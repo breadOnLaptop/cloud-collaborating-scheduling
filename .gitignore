@@ -1,0 +1,5 @@
+# build folder
+build/
+
+# cache
+.mypy_cache/
