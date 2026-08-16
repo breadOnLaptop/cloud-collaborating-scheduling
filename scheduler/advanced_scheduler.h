@@ -1,6 +1,6 @@
 /**
- * @file baseline_scheduler.h
- * @brief Baseline decision engine for task distribution.
+ * @file advanced_scheduler.h
+ * @brief Primary decision engine for intelligent task distribution.
  * @author Authored by: Peeyush Maurya
  */
 
@@ -15,12 +15,14 @@
 #include "batcher.h"
 
 /**
- * @class BaselineScheduler
- * @brief Provides naive scheduling implementation for baseline evaluation.
+ * @class AdvancedScheduler
+ * @brief Orchestrates queue management and task dispatch mechanisms.
  *
- * Utilizes round-robin routing, static chunking, and hardcoded batch sizes.
+ * Evaluates real-time state metrics to execute queue-aware routing,
+ * dynamic batch sizing, and adaptive layer chunking algorithms across
+ * distributed edge and cloud hardware topologies.
  */
-class BaselineScheduler {
+class AdvancedScheduler {
 private:
     /**
      * @brief Purges finalized requests from active processing queues.
@@ -38,15 +40,36 @@ private:
         }
     }
 
+    /**
+     * @brief Identifies the optimal cloud node based on current systemic load.
+     * @param state The global state object.
+     * @param params System parameters defining topology constraints.
+     * @return The identifier of the least saturated cloud server.
+     */
+    int getOptimalCloudNode(const SystemState& state, const SystemParams& params) {
+        int best_cloud = 0;
+        size_t min_load = static_cast<size_t>(-1);
+        
+        for (int k = 0; k < params.K; ++k) {
+            size_t load = state.waiting_for_p_proc[k].size() + state.waiting_for_d_proc[k].size();
+            if (load < min_load) {
+                min_load = load;
+                best_cloud = k;
+            }
+        }
+        return best_cloud;
+    }
+
 public:
     /**
      * @brief Evaluates active queues to formulate the subsequent execution matrix.
      * @param state The global state containing queue metrics.
-     * @param params System parameters defining topology constraints.
+     * @param parser The event parser containing configuration and timing tables.
      * @return A collection of formatted assignment directives.
      */
-    std::vector<std::string> scheduleTasks(SystemState& state, const SystemParams& params) {
+    std::vector<std::string> scheduleTasks(SystemState& state, const EventParser& parser) {
         std::vector<std::string> assignments;
+        const SystemParams& params = parser.params;
 
         cleanQueue(state.waiting_for_p_pre, state);
         cleanQueue(state.waiting_for_p_post, state);
@@ -67,12 +90,12 @@ public:
                 state.edge_server.setBusy();
                 
             } else if (!state.waiting_for_d_post.empty()) {
-                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_post, std::map<int, TaskDurations>());
+                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_post, parser.task_time_table);
                 assignments.push_back("E D POST -1 " + Batcher::formatBatchStr(batch));
                 state.edge_server.setBusy();
                 
             } else if (!state.waiting_for_d_pre.empty()) {
-                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_pre, std::map<int, TaskDurations>());
+                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_pre, parser.task_time_table);
                 assignments.push_back("E D PRE -1 " + Batcher::formatBatchStr(batch));
                 state.edge_server.setBusy();
                 
@@ -80,7 +103,7 @@ public:
                 int r_id = state.waiting_for_p_pre.front(); 
                 state.waiting_for_p_pre.pop();
                 
-                int cloud = r_id % params.K; 
+                int cloud = getOptimalCloudNode(state, params);
                 state.all_request[r_id].assigned_cloud = cloud;
                 
                 assignments.push_back("E P PRE " + std::to_string(cloud) + " " + std::to_string(r_id));
@@ -91,7 +114,7 @@ public:
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
                 if (!state.waiting_for_d_proc[k].empty()) {
-                    std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_proc[k], std::map<int, TaskDurations>());
+                    std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_proc[k], parser.task_time_table);
                     assignments.push_back("C" + std::to_string(k) + " D PROC " + std::to_string(k) + " " + Batcher::formatBatchStr(batch));
                     state.cloud_servers[k].setBusy();
                     

@@ -8,7 +8,7 @@ files_in_order = [
     "io/event_parser.h",
     "scheduler/chunker.h",
     "scheduler/batcher.h",
-    "scheduler/baseline_scheduler.h",
+    "scheduler/advanced_scheduler.h",
     "main.cpp"
 ]
 
@@ -39,6 +39,8 @@ for file_path in files_in_order:
 out_path = os.path.join(project_root, output_file)
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 with open(out_path, 'w') as out:
+    out.write("// Authored by: Peeyush Maurya\n")
+    out.write("// Full Implementation: https://github.com/breadOnLaptop/cloud-collaborating-scheduling\n\n")
     for inc in sorted(list(system_includes)):
         out.write(inc + "\n")
     out.write("\n")

@@ -1,21 +1,40 @@
+/**
+ * @file chunker.h
+ * @brief Adaptive segmentation logic for heavy computational tasks.
+ * @author Authored by: Peeyush Maurya
+ */
+
 #pragma once
 
 #include <algorithm>
 #include "../io/event_parser.h"
 
+/**
+ * @class Chunker
+ * @brief Calculates dynamic block sizes for neural network layer processing.
+ *
+ * Facilitates the division of prefill tasks into smaller, manageable chunks,
+ * ensuring compute resources are regularly yielded for latency-sensitive operations.
+ */
 class Chunker {
 public:
-    // Determine the end layer `le` for a P PROC task.
-    // We slice the huge prefill computation into smaller chunks. 
-    // This frees the Cloud up regularly so it can run fast Decode batches between Prefill chunks.
-    static int getNextChunkEnd(int ls, const SystemParams& params) {
-        // A standard approach is to process up to 4 layers at a time.
-        // In advanced versions, this can be mathematically calculated using the Task-Time table.
-        int chunk_size = 4; 
+    /**
+     * @brief Computes the ending layer index for the subsequent processing chunk.
+     * @param ls The starting layer index.
+     * @param params Global system parameters determining maximum layer depth.
+     * @param decode_queue_size The current workload size of fast decode operations.
+     * @return The calculated terminal layer index for the chunk.
+     */
+    static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size = 0) {
+        int chunk_size = 4;
+        
+        if (decode_queue_size == 0) {
+            chunk_size = 16;
+        } else if (decode_queue_size > 32) {
+            chunk_size = 2;
+        }
         
         int remaining = params.num_layers - ls;
-        
-        // If there are only a few layers left, just finish the job to avoid another setup penalty (S)
         if (remaining <= chunk_size + 1) {
             return params.num_layers;
         }

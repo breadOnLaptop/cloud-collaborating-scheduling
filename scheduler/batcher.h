@@ -1,25 +1,56 @@
+/**
+ * @file batcher.h
+ * @brief Batch consolidation logic for multi-request scheduling.
+ * @author Authored by: Peeyush Maurya
+ */
+
 #pragma once
 
 #include <vector>
 #include <queue>
 #include <string>
+#include <map>
+#include "../io/event_parser.h"
 
+/**
+ * @class Batcher
+ * @brief Aggregates independent requests into contiguous execution blocks.
+ *
+ * Optimizes system throughput by calculating the optimal batch size based on
+ * available task duration tables and current queue saturation levels.
+ */
 class Batcher {
 public:
-    // Extracts up to 'max_batch_size' requests from a waiting queue.
-    // Batching spreads the setup penalty (S) over multiple requests, drastically improving throughput.
-    // In advanced versions, max_batch_size can be calculated dynamically by reading the Task-Time table.
-    static std::vector<int> pullBatch(std::queue<int>& q, int max_batch_size = 16) {
+    /**
+     * @brief Extracts an optimal collection of requests from a processing queue.
+     * @param q The target queue containing waiting request identifiers.
+     * @param task_time_table The matrix of predefined hardware execution durations.
+     * @return A vector of request identifiers forming the optimized batch.
+     */
+    static std::vector<int> pullBatch(std::queue<int>& q, const std::map<int, TaskDurations>& task_time_table) {
+        int optimal_max = 16;
+        if (!task_time_table.empty()) {
+            optimal_max = 0;
+            for (const auto& pair : task_time_table) {
+                if (pair.first > optimal_max) {
+                    optimal_max = pair.first;
+                }
+            }
+        }
+        
         std::vector<int> batch;
-        while (!q.empty() && batch.size() < max_batch_size) {
+        while (!q.empty() && batch.size() < static_cast<size_t>(optimal_max)) {
             batch.push_back(q.front());
             q.pop();
         }
         return batch;
     }
 
-    // Helper to format the batch IDs into a space-separated string for the interactor
-    // e.g., returns "3 14 2 9" (where 3 is the count 'm', followed by the request IDs)
+    /**
+     * @brief Formats a batch array into a standardized transmission string.
+     * @param batch The collection of identifiers to format.
+     * @return The string representation formatted for interactor ingestion.
+     */
     static std::string formatBatchStr(const std::vector<int>& batch) {
         std::string res = std::to_string(batch.size());
         for (int id : batch) {

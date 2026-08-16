@@ -1,51 +1,46 @@
+/**
+ * @file main.cpp
+ * @brief Primary entry point for the scheduling orchestration engine.
+ * @author Authored by: Peeyush Maurya
+ */
+
 #include <iostream>
 #include <vector>
 #include <string>
 
 #include "state/system_state.h"
 #include "io/event_parser.h"
-#include "scheduler/baseline_scheduler.h"
+#include "scheduler/advanced_scheduler.h"
 
+/**
+ * @brief Bootstraps the application and manages the primary event loop.
+ * @return Exit status code indicating execution success or failure.
+ */
 int main() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-    // 1. Create our "Ears"
     EventParser parser;
-
-    // Read the initial configuration sent by the interactor
     parser.readStartupConfig();
     parser.readTaskTimeTable();
 
-    // 2. Create our "Memory" (Initialized with K, the number of cloud servers)
     SystemState state(parser.params.K);
+    AdvancedScheduler scheduler;
 
-    // 3. Create our "Brain"
-    BaselineScheduler scheduler;
-
-    // 4. THE HEARTBEAT LOOP
     while (true) {
-
-        // STEP A: Listen to the interactor
-        // This will parse the ARR, TDN, and XDN events and instantly update the SystemState queues.
         bool game_running = parser.readNextFrame(state);
-
+        
         if (!game_running) {
-            // The interactor sent "END", the simulation is over.
-            break;
+            break; 
         }
 
-        // STEP B: Think
-        // Pass the updated queues to the scheduler so it can decide which tasks to assign to FREE servers.
-        std::vector<std::string> assignments = scheduler.scheduleTasks(state, parser.params);
+        std::vector<std::string> assignments = scheduler.scheduleTasks(state, parser);
 
-        // STEP C: Speak
-        // Print the number of assignments, followed by the exact assignment strings.
         std::cout << assignments.size() << "\n";
         for (const std::string& assignment : assignments) {
             std::cout << assignment << "\n";
         }
-
+        
         std::cout << std::flush;
     }
 
