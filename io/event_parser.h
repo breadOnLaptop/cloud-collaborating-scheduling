@@ -5,7 +5,7 @@
 #include <string>
 #include <map>
 
-#include "state/system_state.h"
+#include "../state/system_state.h"
 
 struct SystemParams {
   int K;
@@ -14,10 +14,12 @@ struct SystemParams {
   double SLO1, SLO2, tp_UB, tp_base, dist_base, w_tp, w_c;
 };
 
+// Task duration entity which will be mapped with batch size
 struct TaskDurations {
   double p_pre, p_proc, p_post, d_pre, d_proc, d_post;
 };
 
+// Log to store consumed TDN events for future optimizations
 struct TaskLog {
   double current_time;
   std::string server_name;
@@ -85,6 +87,7 @@ class EventParser {
         std::string server_name;
         std::cin >> server_name;
 
+        // Mark the server as FREE
         if (server_name == "E") {
           state.edge_server.setFree();
         } else {
@@ -138,6 +141,7 @@ class EventParser {
             for(int j{}; j < log.m; j++) { 
               int r_id; std::cin >> r_id; log.r_ids.push_back(r_id);
               
+              // A token was produced! Put it back in line for the next token.
               state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
               state.waiting_for_d_pre.push(r_id);
               state.all_request[r_id].length_out++;
@@ -157,6 +161,7 @@ class EventParser {
         
         std::cin >> remote >> size >> stage >> m;
 
+        // An XDN can carry multiple requests (if it was a batch), so we loop
         for(int j{}; j < m; j++) {
           int r_id;
           std::cin >> r_id;

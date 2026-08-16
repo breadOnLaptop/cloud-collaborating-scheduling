@@ -1,30 +1,33 @@
 #pragma once
 
 enum class RequestState {
-  ARRIVED,
-  WAITING_PREFILL_UP,
-  READY_FOR_PREFILL,
-  WAITING_PREFILL_DOWN,
-  READY_FOR_P_POST,
-  READY_FOR_DECODE,
-  WAITING_DECODE_UP,
-  READY_FOR_D_PROC,
-  WAITING_DECODE_DOWN,
-  READY_FOR_D_POST,
-  FINISHED
+  ARRIVED,              // Just Arrived, Waiting for edge
+  WAITING_PREFILL_UP,   // Data is transferring to cloud
+  READY_FOR_PREFILL,    // At cloud, waiting for P PROC
+  WAITING_PREFILL_DOWN, // Data is transferring back to edge
+  READY_FOR_P_POST,     // At edge, waiting for P POST
+  READY_FOR_DECODE,     // At edge, waiting for D PRE
+  WAITING_DECODE_UP,    // Small token data, transferring to cloud
+  READY_FOR_D_PROC,     // At cloud, waiting for D PROC
+  WAITING_DECODE_DOWN,  // Token data transferring back to edge
+  READY_FOR_D_POST,     // At edge, waiting to finalize token
+  FINISHED              // Request is completed
 };
 
 struct Request {
-  int id;
-  int length_in;
-  int length_out;
-  int assigned_cloud;
-  int layers_completed;
-  RequestState state;
+  int id;               // ARR provides
+  int length_in;        // ARR provides
+  int length_out;       // incremental based on tokens produced
+  int assigned_cloud;   // locked in range of [0, K - 1] during P PRE
+  int layers_completed; // tracks chunking progress during P PROC
+  RequestState state;   // current state of request
 
-  Request(const int& r_id, const int& r_length_in) {
-    id = r_id;
-    length_in = r_length_in;
+  // ARR triggers at ARRIVED request state
+  Request(
+    const int& r_id,        // Request ID
+    const int& r_length_in  // Request Length IN size
+  ) {
+    id = r_id, length_in = r_length_in;
     length_out = 0;
     assigned_cloud = -1;
     layers_completed = 0;

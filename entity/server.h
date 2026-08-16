@@ -1,21 +1,26 @@
 #pragma once
 
-enum class ServerType {
+// classification done as local or remote
+enum ServerType {
   EDGE,
   CLOUD
 };
 
-enum class ServerState {
+// States for checking if server is occupied or not
+enum ServerState {
   BUSY,
   FREE
 };
 
 struct Server {
-  int id;
-  ServerType type;
-  ServerState state;
+  int id;             // range: [0, K - 1]
+  ServerType type;    // either EDGE or CLOUD
+  ServerState state;  // BUSY or FREE
 
-  Server(const int& s_id, const ServerType& s_type) {
+  Server(
+    const int& s_id,          // Server ID
+    const ServerType& s_type  // Server Type: EDGE or CLOUD
+  ) {
     id = s_id;
     type = s_type;
     state = ServerState::FREE;
