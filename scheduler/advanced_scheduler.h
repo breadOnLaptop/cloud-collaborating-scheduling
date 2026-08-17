@@ -10,7 +10,6 @@
 
 #include <vector>
 #include <string>
-#include <map>
 #include <queue>
 #include <set>
 #include <utility>
@@ -23,6 +22,8 @@ class AdvancedScheduler {
 private:
     std::vector<double> total_assigned_work;
     std::set<std::pair<double, int>> cloud_load;
+    int cached_optimal_max = -1; // Computed once, reused forever
+    std::vector<int> batch_buf;  // Reusable scratch buffer for batch pulls
 
     // Amortized O(1) queue cleaning to strictly avoid sorting overhead
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
@@ -57,9 +58,15 @@ private:
     }
 
 public:
-    std::vector<std::string> scheduleTasks(SystemState& state, const EventParser& parser) {
-        std::vector<std::string> assignments;
+    // Writes all assignments directly into a single output buffer — zero vector/string allocations
+    void scheduleTasks(SystemState& state, const EventParser& parser, std::string& out, int& count) {
+        count = 0;
         const SystemParams& params = parser.params;
+
+        // Cache optimal_max once globally — task_time_table never changes after startup
+        if (cached_optimal_max < 0) {
+            cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
+        }
 
         // O(1) Amortized cleanup phase
         cleanQueue(state.waiting_for_p_pre, state);
@@ -71,25 +78,23 @@ public:
             cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
-        int optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
-
         if (state.edge_server.state == ServerState::FREE) {
             // Priority 1: D POST (Finish token quickly for SLO2)
             if (!state.waiting_for_d_post.empty()) {
-                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_post, optimal_max, state);
-                std::string s; s.reserve(64);
-                s.append("E D POST -1 ");
-                s.append(Batcher::formatBatchStr(batch));
-                assignments.push_back(s);
+                Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
+                out.append("E D POST -1 ");
+                Batcher::appendBatchStr(out, batch_buf);
+                out.push_back('\n');
+                count++;
                 state.edge_server.setBusy();
                 
             // Priority 2: D PRE (Start token quickly for SLO2)
             } else if (!state.waiting_for_d_pre.empty()) {
-                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_pre, optimal_max, state);
-                std::string s; s.reserve(64);
-                s.append("E D PRE -1 ");
-                s.append(Batcher::formatBatchStr(batch));
-                assignments.push_back(s);
+                Batcher::pullBatch(state.waiting_for_d_pre, cached_optimal_max, state, batch_buf);
+                out.append("E D PRE -1 ");
+                Batcher::appendBatchStr(out, batch_buf);
+                out.push_back('\n');
+                count++;
                 state.edge_server.setBusy();
                 
             // Priority 3: P POST (Data returning from Cloud)
@@ -98,12 +103,12 @@ public:
                 state.waiting_for_p_post.pop();
                 
                 int cloud = state.all_request[r_id].assigned_cloud;
-                std::string s; s.reserve(32);
-                s.append("E P POST ");
-                appendIntToString(s, cloud);
-                s.push_back(' ');
-                appendIntToString(s, r_id);
-                assignments.push_back(s);
+                out.append("E P POST ");
+                appendIntToString(out, cloud);
+                out.push_back(' ');
+                appendIntToString(out, r_id);
+                out.push_back('\n');
+                count++;
                 state.edge_server.setBusy();
                 
             // Priority 4: P PRE (New data arriving at Cloud)
@@ -115,12 +120,12 @@ public:
                 int cloud = getOptimalCloudNode(state, params, r_id);
                 state.all_request[r_id].assigned_cloud = cloud;
                 
-                std::string s; s.reserve(32);
-                s.append("E P PRE ");
-                appendIntToString(s, cloud);
-                s.push_back(' ');
-                appendIntToString(s, r_id);
-                assignments.push_back(s);
+                out.append("E P PRE ");
+                appendIntToString(out, cloud);
+                out.push_back(' ');
+                appendIntToString(out, r_id);
+                out.push_back('\n');
+                count++;
                 state.edge_server.setBusy();
             }
         }
@@ -129,15 +134,15 @@ public:
             if (state.cloud_servers[k].state == ServerState::FREE) {
                 // Yield to D_PROC decodes natively for token generation SLO
                 if (!state.waiting_for_d_proc[k].empty()) {
-                    std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_proc[k], optimal_max, state);
-                    std::string s; s.reserve(64);
-                    s.append("C");
-                    appendIntToString(s, k);
-                    s.append(" D PROC ");
-                    appendIntToString(s, k);
-                    s.push_back(' ');
-                    s.append(Batcher::formatBatchStr(batch));
-                    assignments.push_back(s);
+                    Batcher::pullBatch(state.waiting_for_d_proc[k], cached_optimal_max, state, batch_buf);
+                    out.push_back('C');
+                    appendIntToString(out, k);
+                    out.append(" D PROC ");
+                    appendIntToString(out, k);
+                    out.push_back(' ');
+                    Batcher::appendBatchStr(out, batch_buf);
+                    out.push_back('\n');
+                    count++;
                     state.cloud_servers[k].setBusy();
                     
                 } else if (!state.waiting_for_p_proc[k].empty()) {
@@ -147,23 +152,21 @@ public:
                     int ls = state.all_request[r_id].layers_completed;
                     int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
                     
-                    std::string s; s.reserve(64);
-                    s.append("C");
-                    appendIntToString(s, k);
-                    s.append(" P PROC ");
-                    appendIntToString(s, ls);
-                    s.push_back(' ');
-                    appendIntToString(s, le);
-                    s.push_back(' ');
-                    appendIntToString(s, k);
-                    s.push_back(' ');
-                    appendIntToString(s, r_id);
-                    assignments.push_back(s);
+                    out.push_back('C');
+                    appendIntToString(out, k);
+                    out.append(" P PROC ");
+                    appendIntToString(out, ls);
+                    out.push_back(' ');
+                    appendIntToString(out, le);
+                    out.push_back(' ');
+                    appendIntToString(out, k);
+                    out.push_back(' ');
+                    appendIntToString(out, r_id);
+                    out.push_back('\n');
+                    count++;
                     state.cloud_servers[k].setBusy();
                 }
             }
         }
-
-        return assignments;
     }
 };

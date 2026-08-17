@@ -9,10 +9,9 @@
 #include <vector>
 #include <queue>
 #include <string>
-#include <map>
-#include "../io/event_parser.h"
-
+#include <unordered_map>
 #include <charconv>
+#include "../io/event_parser.h"
 
 inline void appendIntToString(std::string &s, int v) {
   char buf[32];
@@ -42,8 +41,9 @@ public:
         return optimal_max;
     }
 
-    static std::vector<int> pullBatch(std::queue<int>& q, int optimal_max, const SystemState& state) {
-        std::vector<int> batch;
+    // Writes into a pre-allocated vector to avoid heap allocation per call
+    static void pullBatch(std::queue<int>& q, int optimal_max, const SystemState& state, std::vector<int>& batch) {
+        batch.clear();
         while (!q.empty() && batch.size() < static_cast<size_t>(optimal_max)) {
             int id = q.front();
             q.pop();
@@ -52,17 +52,14 @@ public:
             }
             batch.push_back(id);
         }
-        return batch;
     }
 
-    static std::string formatBatchStr(const std::vector<int>& batch) {
-        std::string res;
-        res.reserve(batch.size() * 4 + 16);
-        appendIntToString(res, (int)batch.size());
+    // Appends formatted batch directly into an existing output buffer
+    static void appendBatchStr(std::string& out, const std::vector<int>& batch) {
+        appendIntToString(out, (int)batch.size());
         for (int id : batch) {
-            res.push_back(' ');
-            appendIntToString(res, id);
+            out.push_back(' ');
+            appendIntToString(out, id);
         }
-        return res;
     }
 };

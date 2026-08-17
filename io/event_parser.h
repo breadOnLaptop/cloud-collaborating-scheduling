@@ -10,6 +10,8 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <cstring>
+#include <cstdlib>
 
 #include "../state/system_state.h"
 
@@ -84,21 +86,26 @@ public:
    * @return true if the simulation is ongoing, false if the END signal is received.
    */
   bool readNextFrame(SystemState& state) {
-    std::string token;
-    std::cin >> token;
+    // Read first token as char[] to handle both END sentinel and timestamp without heap alloc
+    char ts_buf[32];
+    if (!(std::cin >> ts_buf)) return false;
+    if (ts_buf[0] == 'E') return false; // END signal
 
-    if(token == "END" || std::cin.eof()) return false;
-
-    current_time = std::stod(token);
+    current_time = std::strtod(ts_buf, nullptr);
 
     int event_count;
     std::cin >> event_count;
 
+    // Fix 4: Stack-allocated char buffers for all short tokens — zero heap allocations
+    char event_type[8];
+    char server_name[16];
+    char p_or_d[4];
+    char step[8];
+
     for(int i = 0; i < event_count; i++) {
-      std::string event_type;
       std::cin >> event_type;
 
-      if(event_type == "ARR") {
+      if(event_type[0] == 'A') { // ARR
         int r_id, length_in;
         std::cin >> r_id >> length_in;
 
@@ -109,48 +116,46 @@ public:
         state.all_request[r_id] = std::move(new_req);
         state.waiting_for_p_pre.push(r_id);
 
-      } else if(event_type == "TDN") {
-        std::string server_name;
+      } else if(event_type[0] == 'T') { // TDN
         std::cin >> server_name;
 
-        if (server_name == "E") {
+        if (server_name[0] == 'E') {
           state.edge_server.setFree();
         } else {
-          int cid = std::stoi(server_name.substr(1));
+          // Fix 5: Parse cloud ID from char[] without substr or stoi
+          int cid = 0;
+          for (int j = 1; server_name[j]; j++) {
+            cid = cid * 10 + (server_name[j] - '0');
+          }
           state.cloud_servers[cid].setFree();
         }
 
-        std::string p_or_d, step;
         std::cin >> p_or_d >> step;
         
         int remote, ls, le, m, r_id, minus_one;
         double duration;
 
-        if (p_or_d == "P") {
-          if (step == "PRE") {
+        if (p_or_d[0] == 'P') {
+          if (step[1] == 'R') { // PRE
             std::cin >> remote >> r_id >> duration;
-          } else if (step == "PROC") {
+          } else if (step[1] == 'O') { // POST
+            std::cin >> remote >> r_id >> duration;
+            state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
+            state.waiting_for_d_pre.push(r_id);
+          } else { // PROC
             std::cin >> ls >> le >> remote >> r_id >> duration;
             state.all_request[r_id].layers_completed = le;
             if (le < params.num_layers) {
               state.all_request[r_id].state = RequestState::READY_FOR_PREFILL;
               state.waiting_for_p_proc[remote].push(r_id);
             }
-          } else if (step == "POST") {
-            std::cin >> remote >> r_id >> duration;
-            state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
-            state.waiting_for_d_pre.push(r_id);
           }
-        } else if (p_or_d == "D") {
-          if (step == "PRE") {
+        } else { // D
+          if (step[1] == 'R') { // PRE
             std::cin >> minus_one >> m;
             for(int j = 0; j < m; j++) { std::cin >> r_id; }
             std::cin >> duration;
-          } else if (step == "PROC") {
-            std::cin >> remote >> m;
-            for(int j = 0; j < m; j++) { std::cin >> r_id; }
-            std::cin >> duration;
-          } else if (step == "POST") {
+          } else if (step[1] == 'O') { // POST
             std::cin >> minus_one >> m;
             for(int j = 0; j < m; j++) { 
               std::cin >> r_id;
@@ -159,16 +164,20 @@ public:
               state.all_request[r_id].length_out++;
             }
             std::cin >> duration;
+          } else { // PROC
+            std::cin >> remote >> m;
+            for(int j = 0; j < m; j++) { std::cin >> r_id; }
+            std::cin >> duration;
           }
         }
 
-      } else if(event_type == "XDN") {
-        std::string direction;
+      } else if(event_type[0] == 'X') { // XDN
+        char direction[8];
+        char stage[8];
         std::cin >> direction;
         
         int remote, m; 
         long long size; 
-        std::string stage;
         
         std::cin >> remote >> size >> stage >> m;
 
@@ -176,24 +185,25 @@ public:
           int r_id;
           std::cin >> r_id;
 
-          if (direction == "UP" && stage == "PRE") {
-            state.all_request[r_id].state = RequestState::READY_FOR_PREFILL;
-            state.waiting_for_p_proc[remote].push(r_id);
-          } 
-          else if (direction == "DOWN" && stage == "PRE") {
-            state.all_request[r_id].state = RequestState::READY_FOR_P_POST;
-            state.waiting_for_p_post.push(r_id);
-          } 
-          else if (direction == "UP" && stage == "DEC") {
-            state.all_request[r_id].state = RequestState::READY_FOR_D_PROC;
-            state.waiting_for_d_proc[remote].push(r_id);
-          } 
-          else if (direction == "DOWN" && stage == "DEC") {
-            state.all_request[r_id].state = RequestState::READY_FOR_D_POST;
-            state.waiting_for_d_post.push(r_id);
+          if (direction[0] == 'U') { // UP
+            if (stage[0] == 'P') { // PRE
+              state.all_request[r_id].state = RequestState::READY_FOR_PREFILL;
+              state.waiting_for_p_proc[remote].push(r_id);
+            } else { // DEC
+              state.all_request[r_id].state = RequestState::READY_FOR_D_PROC;
+              state.waiting_for_d_proc[remote].push(r_id);
+            }
+          } else { // DOWN
+            if (stage[0] == 'P') { // PRE
+              state.all_request[r_id].state = RequestState::READY_FOR_P_POST;
+              state.waiting_for_p_post.push(r_id);
+            } else { // DEC
+              state.all_request[r_id].state = RequestState::READY_FOR_D_POST;
+              state.waiting_for_d_post.push(r_id);
+            }
           }
         }
-      } else if(event_type == "FIN") {
+      } else if(event_type[0] == 'F') { // FIN
         int r_id;
         std::cin >> r_id;
         state.all_request[r_id].state = RequestState::FINISHED;
