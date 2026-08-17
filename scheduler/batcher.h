@@ -29,18 +29,6 @@ public:
      */
     static std::vector<int> pullBatch(std::queue<int>& q, const std::map<int, TaskDurations>& task_time_table) {
         int optimal_max = 16;
-        if (!task_time_table.empty()) {
-            optimal_max = 0;
-            for (const auto& pair : task_time_table) {
-                if (pair.first > optimal_max) {
-                    optimal_max = pair.first;
-                }
-            }
-        }
-        
-        if (optimal_max > 64) {
-            optimal_max = 64; 
-        }
         
         std::vector<int> batch;
         while (!q.empty() && batch.size() < static_cast<size_t>(optimal_max)) {
