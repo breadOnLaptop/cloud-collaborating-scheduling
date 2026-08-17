@@ -22,13 +22,8 @@ private:
     std::vector<double> total_assigned_work;
 
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
-        int sz = q.size();
-        for (int i = 0; i < sz; ++i) {
-            int id = q.front();
+        while (!q.empty() && state.all_request[q.front()].state == RequestState::FINISHED) {
             q.pop();
-            if (state.all_request[id].state != RequestState::FINISHED) {
-                q.push(id);
-            }
         }
     }
 
@@ -68,13 +63,13 @@ public:
         if (state.edge_server.state == ServerState::FREE) {
             // Priority 1: D POST (Finish token quickly for SLO2)
             if (!state.waiting_for_d_post.empty()) {
-                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_post, parser.task_time_table, params.SLO2);
+                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_post, parser.task_time_table, params.SLO2, state);
                 assignments.push_back("E D POST -1 " + Batcher::formatBatchStr(batch));
                 state.edge_server.setBusy();
                 
             // Priority 2: D PRE (Start token quickly for SLO2)
             } else if (!state.waiting_for_d_pre.empty()) {
-                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_pre, parser.task_time_table, params.SLO2);
+                std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_pre, parser.task_time_table, params.SLO2, state);
                 assignments.push_back("E D PRE -1 " + Batcher::formatBatchStr(batch));
                 state.edge_server.setBusy();
                 
@@ -104,7 +99,7 @@ public:
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
                 if (!state.waiting_for_d_proc[k].empty()) {
-                    std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_proc[k], parser.task_time_table, params.SLO2);
+                    std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_proc[k], parser.task_time_table, params.SLO2, state);
                     assignments.push_back("C" + std::to_string(k) + " D PROC " + std::to_string(k) + " " + Batcher::formatBatchStr(batch));
                     state.cloud_servers[k].setBusy();
                     

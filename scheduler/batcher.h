@@ -14,19 +14,17 @@
 
 class Batcher {
 public:
-    static std::vector<int> pullBatch(std::queue<int>& q, const std::map<int, TaskDurations>& task_time_table, double slo2_limit = 1e9) {
+    static std::vector<int> pullBatch(std::queue<int>& q, const std::map<int, TaskDurations>& task_time_table, double slo2_limit, const SystemState& state) {
         int optimal_max = 16;
         if (!task_time_table.empty()) {
             optimal_max = 0;
             for (const auto& pair : task_time_table) {
-                // Ensure we don't pick a batch size that takes so long it violates SLO2
                 if (pair.second.d_proc <= slo2_limit * 0.5) {
                     if (pair.first > optimal_max) {
                         optimal_max = pair.first;
                     }
                 }
             }
-            // Fallback to the smallest batch size if all exceed the safe SLO2 threshold
             if (optimal_max == 0) {
                 optimal_max = task_time_table.begin()->first;
             }
@@ -34,8 +32,12 @@ public:
         
         std::vector<int> batch;
         while (!q.empty() && batch.size() < static_cast<size_t>(optimal_max)) {
-            batch.push_back(q.front());
+            int id = q.front();
             q.pop();
+            if (state.all_request[id].state == RequestState::FINISHED) {
+                continue;
+            }
+            batch.push_back(id);
         }
         return batch;
     }
