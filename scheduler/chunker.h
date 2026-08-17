@@ -15,9 +15,11 @@
  * @class Chunker
  * @brief Determines how many neural network layers to process in a single P_PROC call.
  *
- * When decode tasks are waiting, yields aggressively (chunk_size = 2) to minimize
- * token latency (SLO2). When no decodes are pending, bursts up to 16 layers to
- * reduce setup penalty overhead and maximize throughput.
+ * Each P_PROC chunk pays a fixed setup penalty S. Fewer chunks = less overhead
+ * but longer blocking of the cloud server. The chunk size adapts to decode
+ * queue pressure on the specific cloud server:
+ *   - No decodes waiting: process all remaining layers (zero extra S overhead)
+ *   - Decodes waiting: chunk to 8 layers (balances throughput vs decode latency)
  */
 class Chunker {
 public:
@@ -32,11 +34,11 @@ public:
         int chunk_size;
         
         if (decode_queue_size > 0) {
-            // Yield to pending decodes: minimize blocking to protect SLO2
-            chunk_size = 2;
+            // Yield to pending decodes with moderate chunks to balance S overhead vs latency
+            chunk_size = std::min(params.num_layers, 8);
         } else {
-            // No decode pressure: burst to reduce setup penalty overhead
-            chunk_size = std::min(params.num_layers, 16);
+            // No decode pressure: process all remaining layers to eliminate setup penalties
+            chunk_size = params.num_layers;
         }
         
         int remaining = params.num_layers - ls;

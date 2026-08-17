@@ -1,7 +1,7 @@
 /**
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
- *        Implements decode-first priority scheduling with O(log K) weighted
+ *        Implements pipeline-aware priority scheduling with O(log K) weighted
  *        cloud load balancing and adaptive prefill chunking.
  *        Refer to scheduler/baseline_scheduler.h for the baseline reference.
  *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
@@ -24,14 +24,18 @@
  * @class AdvancedScheduler
  * @brief Orchestrates task assignment across edge and cloud servers.
  *
- * Scheduling policy:
- *   Edge server priority: D_POST > D_PRE > P_POST > P_PRE
- *   Cloud server priority: D_PROC > P_PROC (decode-first to minimize token latency)
+ * Edge priority (pipeline-aware):
+ *   1. D_POST  — always first: completes a token (critical for TPOT)
+ *   2. P_POST  — completes a prefill, reduces TDR, makes request decode-ready
+ *   3. P_PRE   — only when a cloud server is idle: prevents pipeline starvation
+ *   4. D_PRE   — batches decode requests for cloud processing
+ *   5. P_PRE   — background prefill when no cloud is starving
  *
- * Cloud load balancing uses a sorted set of (work, id) pairs for O(log K)
- * minimum selection. Batch sizes are bounded by SLO2 constraints. All output
- * is written directly into a caller-provided string buffer to avoid per-frame
- * heap allocations.
+ * Cloud priority: D_PROC > P_PROC (decode-first to minimize token latency)
+ *
+ * This priority order prevents the edge from being monopolized by decode
+ * operations, which would starve new requests and cause TDR to explode
+ * on large inputs.
  */
 class AdvancedScheduler {
 private:
@@ -66,7 +70,6 @@ private:
     /**
      * @brief Selects the least-loaded cloud server and assigns work to it.
      *        O(log K) via sorted set extraction and reinsertion.
-     * @return The index of the optimal cloud server.
      */
     int getOptimalCloudNode(const SystemState& state, const SystemParams& params, int r_id) {
         ensureCloudInit(params);
@@ -82,19 +85,29 @@ private:
         return best_cloud;
     }
 
+    /**
+     * @brief Checks if any cloud server is idle with no queued work.
+     *        Used to trigger P_PRE priority elevation to prevent pipeline starvation.
+     */
+    bool isAnyCloudStarving(const SystemState& state, const SystemParams& params) {
+        for (int k = 0; k < params.K; ++k) {
+            if (state.cloud_servers[k].state == ServerState::FREE &&
+                state.waiting_for_p_proc[k].empty() &&
+                state.waiting_for_d_proc[k].empty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 public:
     /**
      * @brief Evaluates all queues and emits assignment directives into an output buffer.
-     * @param state Mutable system state containing server and queue status.
-     * @param parser Provides task timing data and system parameters.
-     * @param out Output buffer for formatted assignment strings.
-     * @param count Output counter for the number of assignments produced.
      */
     void scheduleTasks(SystemState& state, const EventParser& parser, std::string& out, int& count) {
         count = 0;
         const SystemParams& params = parser.params;
 
-        // Compute SLO2-bounded batch limit once; task_time_table is immutable after startup
         if (cached_optimal_max < 0) {
             cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
         }
@@ -109,8 +122,9 @@ public:
             cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
-        // --- Edge server scheduling (single server, decode-first priority) ---
+        // --- Edge server scheduling (pipeline-aware priority) ---
         if (state.edge_server.state == ServerState::FREE) {
+            // Priority 1: D POST — completes a token, critical for both tp and TPOT
             if (!state.waiting_for_d_post.empty()) {
                 Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
                 out.append("E D POST -1 ");
@@ -118,19 +132,12 @@ public:
                 out.push_back('\n');
                 count++;
                 state.edge_server.setBusy();
-                
-            } else if (!state.waiting_for_d_pre.empty()) {
-                Batcher::pullBatch(state.waiting_for_d_pre, cached_optimal_max, state, batch_buf);
-                out.append("E D PRE -1 ");
-                Batcher::appendBatchStr(out, batch_buf);
-                out.push_back('\n');
-                count++;
-                state.edge_server.setBusy();
-                
+
+            // Priority 2: P POST — completes prefill, reduces TDR, makes request decode-ready
             } else if (!state.waiting_for_p_post.empty()) {
-                int r_id = state.waiting_for_p_post.front(); 
+                int r_id = state.waiting_for_p_post.front();
                 state.waiting_for_p_post.pop();
-                
+
                 int cloud = state.all_request[r_id].assigned_cloud;
                 out.append("E P POST ");
                 appendIntToString(out, cloud);
@@ -139,14 +146,40 @@ public:
                 out.push_back('\n');
                 count++;
                 state.edge_server.setBusy();
-                
-            } else if (!state.waiting_for_p_pre.empty()) {
-                int r_id = state.waiting_for_p_pre.front(); 
+
+            // Priority 3: P PRE when clouds are starving — prevents pipeline starvation
+            } else if (!state.waiting_for_p_pre.empty() && isAnyCloudStarving(state, params)) {
+                int r_id = state.waiting_for_p_pre.front();
                 state.waiting_for_p_pre.pop();
-                
+
                 int cloud = getOptimalCloudNode(state, params, r_id);
                 state.all_request[r_id].assigned_cloud = cloud;
-                
+
+                out.append("E P PRE ");
+                appendIntToString(out, cloud);
+                out.push_back(' ');
+                appendIntToString(out, r_id);
+                out.push_back('\n');
+                count++;
+                state.edge_server.setBusy();
+
+            // Priority 4: D PRE — starts a decode batch
+            } else if (!state.waiting_for_d_pre.empty()) {
+                Batcher::pullBatch(state.waiting_for_d_pre, cached_optimal_max, state, batch_buf);
+                out.append("E D PRE -1 ");
+                Batcher::appendBatchStr(out, batch_buf);
+                out.push_back('\n');
+                count++;
+                state.edge_server.setBusy();
+
+            // Priority 5: P PRE — background prefill when no cloud is starving
+            } else if (!state.waiting_for_p_pre.empty()) {
+                int r_id = state.waiting_for_p_pre.front();
+                state.waiting_for_p_pre.pop();
+
+                int cloud = getOptimalCloudNode(state, params, r_id);
+                state.all_request[r_id].assigned_cloud = cloud;
+
                 out.append("E P PRE ");
                 appendIntToString(out, cloud);
                 out.push_back(' ');
@@ -157,7 +190,7 @@ public:
             }
         }
 
-        // --- Cloud server scheduling (per-server, decode-first priority) ---
+        // --- Cloud server scheduling (per-server, decode-first) ---
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
                 if (!state.waiting_for_d_proc[k].empty()) {
