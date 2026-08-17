@@ -9,7 +9,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <map>
+#include <unordered_map>
 
 #include "../state/system_state.h"
 
@@ -74,7 +74,7 @@ class EventParser {
 public:
   double current_time;                            // Current simulation timestamp.
   SystemParams params;                            // Global system parameters.
-  std::map<int, TaskDurations> task_time_table;   // Table of execution times grouped by batch size.
+  std::unordered_map<int, TaskDurations> task_time_table;   // Table of execution times grouped by batch size.
   std::vector<TaskLog> task_history;              // Accumulated log of completed tasks.
 
   /**

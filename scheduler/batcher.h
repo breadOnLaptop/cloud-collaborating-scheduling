@@ -22,7 +22,7 @@ inline void appendIntToString(std::string &s, int v) {
 
 class Batcher {
 public:
-    static int computeOptimalMax(const std::map<int, TaskDurations>& task_time_table, double slo2_limit) {
+    static int computeOptimalMax(const std::unordered_map<int, TaskDurations>& task_time_table, double slo2_limit) {
         if (task_time_table.empty()) return 16;
         int optimal_max = 0;
         for (const auto& pair : task_time_table) {
@@ -32,7 +32,14 @@ public:
                 }
             }
         }
-        return optimal_max == 0 ? task_time_table.begin()->first : optimal_max;
+        if (optimal_max == 0) {
+            int min_batch = 1e9;
+            for (const auto& pair : task_time_table) {
+                if (pair.first < min_batch) min_batch = pair.first;
+            }
+            return min_batch;
+        }
+        return optimal_max;
     }
 
     static std::vector<int> pullBatch(std::queue<int>& q, int optimal_max, const SystemState& state) {
