@@ -19,9 +19,8 @@ public:
             // This prevents P_PROC from blocking the server and causing SLO2 (Token Latency) failures.
             chunk_size = 2;
         } else {
-            // Unrestricted bursting: If the queue is clear, process ALL remaining layers at once.
-            // This completely eliminates the S (Setup) time penalty, massively increasing throughput.
-            chunk_size = params.num_layers;
+            // Cap burst to 16 to avoid pathological single-task stalls that starve frames
+            chunk_size = std::min(params.num_layers, 16);
         }
         
         int remaining = params.num_layers - ls;
