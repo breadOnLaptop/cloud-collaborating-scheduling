@@ -9,29 +9,17 @@
 #include <algorithm>
 #include "../io/event_parser.h"
 
-/**
- * @class Chunker
- * @brief Calculates dynamic block sizes for neural network layer processing.
- *
- * Facilitates the division of prefill tasks into smaller, manageable chunks,
- * ensuring compute resources are regularly yielded for latency-sensitive operations.
- */
 class Chunker {
 public:
-    /**
-     * @brief Computes the ending layer index for the subsequent processing chunk.
-     * @param ls The starting layer index.
-     * @param params Global system parameters determining maximum layer depth.
-     * @param decode_queue_size The current workload size of fast decode operations.
-     * @return The calculated terminal layer index for the chunk.
-     */
     static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size = 0) {
         int chunk_size = 4;
         
-        if (decode_queue_size == 0) {
+        // If decodes are waiting, yield IMMEDIATELY (smallest possible chunk)
+        if (decode_queue_size > 0) {
+            chunk_size = 1;
+        } else {
+            // Otherwise, burst large chunks to avoid setup penalties
             chunk_size = 16;
-        } else if (decode_queue_size > 32) {
-            chunk_size = 2;
         }
         
         int remaining = params.num_layers - ls;
