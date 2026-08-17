@@ -117,7 +117,9 @@ public:
                 int r_id = state.waiting_for_p_pre.front(); 
                 state.waiting_for_p_pre.pop();
                 
-                int cloud = getOptimalCloudNode(state, params);
+                // Use Round Robin to perfectly distribute in-flight requests instantly
+                // overriding the queue-based min-heap which creates artificial convoys.
+                int cloud = r_id % params.K;
                 state.all_request[r_id].assigned_cloud = cloud;
                 
                 assignments.push_back("E P PRE " + std::to_string(cloud) + " " + std::to_string(r_id));
