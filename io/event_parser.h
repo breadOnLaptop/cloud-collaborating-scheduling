@@ -46,36 +46,11 @@ struct TaskDurations {
   double d_post;  // Decode post-processing duration.
 };
 
-/**
- * @struct TaskLog
- * @brief Records the execution history of a completed task.
- */
-struct TaskLog {
-  double current_time;      // Timestamp of the event.
-  std::string server_name;  // Identifier of the executing server.
-  std::string p_or_d;       // Phase identifier (Prefill or Decode).
-  std::string step;         // Sub-step identifier (PRE, PROC, POST).
-  int remote = -1;          // Remote server index, if applicable.
-  int ls = -1;              // Starting layer index.
-  int le = -1;              // Ending layer index.
-  int m = 0;                // Number of requests in the batch.
-  std::vector<int> r_ids;   // Identifiers of requests within the batch.
-  double duration = 0.0;    // Recorded duration of the task.
-};
-
-/**
- * @class EventParser
- * @brief Parses interactive I/O streams to mutate system state.
- *
- * Processes initial configuration data and ingests real-time simulation events
- * (ARR, TDN, XDN, FIN) to keep the global memory synchronized.
- */
 class EventParser {
 public:
   double current_time;                            // Current simulation timestamp.
   SystemParams params;                            // Global system parameters.
   std::unordered_map<int, TaskDurations> task_time_table;   // Table of execution times grouped by batch size.
-  std::vector<TaskLog> task_history;              // Accumulated log of completed tasks.
 
   /**
    * @brief Reads the initial startup configuration parameters.
@@ -147,58 +122,45 @@ public:
 
         std::string p_or_d, step;
         std::cin >> p_or_d >> step;
-
-        TaskLog log;
-        log.current_time = current_time;
-        log.server_name = server_name;
-        log.p_or_d = p_or_d;
-        log.step = step;
+        
+        int remote, ls, le, m, r_id, minus_one;
+        double duration;
 
         if (p_or_d == "P") {
           if (step == "PRE") {
-            int r_id;
-            std::cin >> log.remote >> r_id >> log.duration;
-            log.r_ids.push_back(r_id);
+            std::cin >> remote >> r_id >> duration;
           } else if (step == "PROC") {
-            int r_id;
-            std::cin >> log.ls >> log.le >> log.remote >> r_id >> log.duration;
-            log.r_ids.push_back(r_id);
-            
-            state.all_request[r_id].layers_completed = log.le;
-            if (log.le < params.num_layers) {
+            std::cin >> ls >> le >> remote >> r_id >> duration;
+            state.all_request[r_id].layers_completed = le;
+            if (le < params.num_layers) {
               state.all_request[r_id].state = RequestState::READY_FOR_PREFILL;
-              state.waiting_for_p_proc[log.remote].push(r_id);
+              state.waiting_for_p_proc[remote].push(r_id);
             }
           } else if (step == "POST") {
-            int r_id;
-            std::cin >> log.remote >> r_id >> log.duration;
-            log.r_ids.push_back(r_id);
-            
+            std::cin >> remote >> r_id >> duration;
             state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
             state.waiting_for_d_pre.push(r_id);
           }
         } else if (p_or_d == "D") {
           if (step == "PRE") {
-            int minus_one; std::cin >> minus_one >> log.m;
-            for(int j = 0; j < log.m; j++) { int r_id; std::cin >> r_id; log.r_ids.push_back(r_id); }
-            std::cin >> log.duration;
+            std::cin >> minus_one >> m;
+            for(int j = 0; j < m; j++) { std::cin >> r_id; }
+            std::cin >> duration;
           } else if (step == "PROC") {
-            std::cin >> log.remote >> log.m;
-            for(int j = 0; j < log.m; j++) { int r_id; std::cin >> r_id; log.r_ids.push_back(r_id); }
-            std::cin >> log.duration;
+            std::cin >> remote >> m;
+            for(int j = 0; j < m; j++) { std::cin >> r_id; }
+            std::cin >> duration;
           } else if (step == "POST") {
-            int minus_one; std::cin >> minus_one >> log.m;
-            for(int j = 0; j < log.m; j++) { 
-              int r_id; std::cin >> r_id; log.r_ids.push_back(r_id);
-              
+            std::cin >> minus_one >> m;
+            for(int j = 0; j < m; j++) { 
+              std::cin >> r_id;
               state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
               state.waiting_for_d_pre.push(r_id);
               state.all_request[r_id].length_out++;
             }
-            std::cin >> log.duration;
+            std::cin >> duration;
           }
         }
-        task_history.push_back(log);
 
       } else if(event_type == "XDN") {
         std::string direction;

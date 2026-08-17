@@ -24,28 +24,10 @@ private:
     std::vector<double> total_assigned_work;
     std::set<std::pair<double, int>> cloud_load;
 
-    // Amortized O(1) queue cleaning coupled with SJF state space reduction
-    void cleanAndSortQueueSJF(std::queue<int>& q, const SystemState& state) {
+    // Amortized O(1) queue cleaning to strictly avoid sorting overhead
+    void cleanQueue(std::queue<int>& q, const SystemState& state) {
         while (!q.empty() && state.all_request[q.front()].state == RequestState::FINISHED) {
             q.pop();
-        }
-        
-        if (q.size() > 1) {
-            std::vector<int> items;
-            while (!q.empty()) {
-                int id = q.front();
-                q.pop();
-                if (state.all_request[id].state != RequestState::FINISHED) {
-                    items.push_back(id);
-                }
-            }
-            // State space reduction: Shortest Job First (SJF) drastically minimizes mean_tdr
-            std::sort(items.begin(), items.end(), [&state](int a, int b) {
-                return state.all_request[a].length_in < state.all_request[b].length_in;
-            });
-            for (int id : items) {
-                q.push(id);
-            }
         }
     }
 
@@ -79,14 +61,14 @@ public:
         std::vector<std::string> assignments;
         const SystemParams& params = parser.params;
 
-        // O(1) Amortized cleanup phase + SJF Sort
-        cleanAndSortQueueSJF(state.waiting_for_p_pre, state);
-        cleanAndSortQueueSJF(state.waiting_for_p_post, state);
-        cleanAndSortQueueSJF(state.waiting_for_d_pre, state);
-        cleanAndSortQueueSJF(state.waiting_for_d_post, state);
+        // O(1) Amortized cleanup phase
+        cleanQueue(state.waiting_for_p_pre, state);
+        cleanQueue(state.waiting_for_p_post, state);
+        cleanQueue(state.waiting_for_d_pre, state);
+        cleanQueue(state.waiting_for_d_post, state);
         for(int k = 0; k < params.K; ++k) {
-            cleanAndSortQueueSJF(state.waiting_for_p_proc[k], state);
-            cleanAndSortQueueSJF(state.waiting_for_d_proc[k], state);
+            cleanQueue(state.waiting_for_p_proc[k], state);
+            cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
         int optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
