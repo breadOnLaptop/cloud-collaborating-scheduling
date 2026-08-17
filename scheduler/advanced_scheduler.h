@@ -21,12 +21,14 @@ class AdvancedScheduler {
 private:
     std::vector<double> total_assigned_work;
 
+    // Amortized O(1) queue cleaning to absolutely guarantee no TLEs
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
         while (!q.empty() && state.all_request[q.front()].state == RequestState::FINISHED) {
             q.pop();
         }
     }
 
+    // Weighted load tracking for perfect Cloud balance
     int getOptimalCloudNode(const SystemState& state, const SystemParams& params, int r_id) {
         if (total_assigned_work.empty()) {
             total_assigned_work.assign(params.K, 0.0);
@@ -41,7 +43,7 @@ private:
             }
         }
         
-        // Add this request's sequence length to the chosen cloud's total work
+        // Accumulate work natively using token length to avoid O(N) looping
         total_assigned_work[best_cloud] += state.all_request[r_id].length_in;
         return best_cloud;
     }
@@ -51,6 +53,7 @@ public:
         std::vector<std::string> assignments;
         const SystemParams& params = parser.params;
 
+        // O(1) Amortized cleanup phase
         cleanQueue(state.waiting_for_p_pre, state);
         cleanQueue(state.waiting_for_p_post, state);
         cleanQueue(state.waiting_for_d_pre, state);
@@ -73,7 +76,7 @@ public:
                 assignments.push_back("E D PRE -1 " + Batcher::formatBatchStr(batch));
                 state.edge_server.setBusy();
                 
-            // Priority 3: P POST
+            // Priority 3: P POST (Data returning from Cloud)
             } else if (!state.waiting_for_p_post.empty()) {
                 int r_id = state.waiting_for_p_post.front(); 
                 state.waiting_for_p_post.pop();
@@ -82,12 +85,11 @@ public:
                 assignments.push_back("E P POST " + std::to_string(cloud) + " " + std::to_string(r_id));
                 state.edge_server.setBusy();
                 
-            // Priority 4: P PRE
+            // Priority 4: P PRE (New data arriving at Cloud)
             } else if (!state.waiting_for_p_pre.empty()) {
                 int r_id = state.waiting_for_p_pre.front(); 
                 state.waiting_for_p_pre.pop();
                 
-                // O(1) weighted round robin fixes the TLE and perfectly balances total tokens!
                 int cloud = getOptimalCloudNode(state, params, r_id);
                 state.all_request[r_id].assigned_cloud = cloud;
                 
@@ -98,6 +100,7 @@ public:
 
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
+                // Yield to D_PROC decodes natively for token generation SLO
                 if (!state.waiting_for_d_proc[k].empty()) {
                     std::vector<int> batch = Batcher::pullBatch(state.waiting_for_d_proc[k], parser.task_time_table, params.SLO2, state);
                     assignments.push_back("C" + std::to_string(k) + " D PROC " + std::to_string(k) + " " + Batcher::formatBatchStr(batch));

@@ -12,19 +12,21 @@
 class Chunker {
 public:
     static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size = 0) {
-        int chunk_size = params.num_layers; // Default to full processing to save setup penalty S
+        int chunk_size;
         
-        if (decode_queue_size > 32) {
-            chunk_size = 2; // Severe congestion: yield almost instantly
-        } else if (decode_queue_size > 0) {
-            chunk_size = 4; // Moderate congestion: small chunks to let decodes interleave
+        if (decode_queue_size > 0) {
+            // Extreme yielding: If ANY decode task is waiting, shrink the chunk size to 2 layers.
+            // This prevents P_PROC from blocking the server and causing SLO2 (Token Latency) failures.
+            chunk_size = 2;
         } else {
-            chunk_size = 16; // No decodes: large burst to maximize throughput
+            // Unrestricted bursting: If the queue is clear, process ALL remaining layers at once.
+            // This completely eliminates the S (Setup) time penalty, massively increasing throughput.
+            chunk_size = params.num_layers;
         }
         
         int remaining = params.num_layers - ls;
         if (remaining <= chunk_size + 1) {
-            return params.num_layers;
+            return params.num_layers; // Always finish if 1 layer is left to prevent stragglers
         }
         
         return std::min(ls + chunk_size, params.num_layers);
