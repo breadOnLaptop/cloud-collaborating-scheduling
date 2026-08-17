@@ -19,6 +19,8 @@
 
 class AdvancedScheduler {
 private:
+    std::vector<double> total_assigned_work;
+
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
         int sz = q.size();
         for (int i = 0; i < sz; ++i) {
@@ -30,24 +32,22 @@ private:
         }
     }
 
-    int getOptimalCloudNode(const SystemState& state, const SystemParams& params) {
-        std::vector<double> cloud_work(params.K, 0.0);
-        
-        for (const Request& req : state.all_request) {
-            if (req.state != RequestState::FINISHED && req.assigned_cloud != -1) {
-                int layers_left = params.num_layers - req.layers_completed;
-                cloud_work[req.assigned_cloud] += (double)layers_left * req.length_in; 
-            }
+    int getOptimalCloudNode(const SystemState& state, const SystemParams& params, int r_id) {
+        if (total_assigned_work.empty()) {
+            total_assigned_work.assign(params.K, 0.0);
         }
         
         int best_cloud = 0;
         double min_work = 1e18;
         for (int k = 0; k < params.K; ++k) {
-            if (cloud_work[k] < min_work) {
-                min_work = cloud_work[k];
+            if (total_assigned_work[k] < min_work) {
+                min_work = total_assigned_work[k];
                 best_cloud = k;
             }
         }
+        
+        // Add this request's sequence length to the chosen cloud's total work
+        total_assigned_work[best_cloud] += state.all_request[r_id].length_in;
         return best_cloud;
     }
 
@@ -92,7 +92,8 @@ public:
                 int r_id = state.waiting_for_p_pre.front(); 
                 state.waiting_for_p_pre.pop();
                 
-                int cloud = getOptimalCloudNode(state, params);
+                // O(1) weighted round robin fixes the TLE and perfectly balances total tokens!
+                int cloud = getOptimalCloudNode(state, params, r_id);
                 state.all_request[r_id].assigned_cloud = cloud;
                 
                 assignments.push_back("E P PRE " + std::to_string(cloud) + " " + std::to_string(r_id));

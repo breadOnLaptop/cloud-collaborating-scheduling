@@ -12,14 +12,14 @@
 class Chunker {
 public:
     static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size = 0) {
-        int chunk_size = 4;
+        int chunk_size = params.num_layers; // Default to full processing to save setup penalty S
         
-        // If decodes are waiting, yield IMMEDIATELY (smallest possible chunk)
-        if (decode_queue_size > 0) {
-            chunk_size = 1;
+        if (decode_queue_size > 32) {
+            chunk_size = 2; // Severe congestion: yield almost instantly
+        } else if (decode_queue_size > 0) {
+            chunk_size = 4; // Moderate congestion: small chunks to let decodes interleave
         } else {
-            // Otherwise, burst large chunks to avoid setup penalties
-            chunk_size = 16;
+            chunk_size = 16; // No decodes: large burst to maximize throughput
         }
         
         int remaining = params.num_layers - ls;
