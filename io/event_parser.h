@@ -136,12 +136,12 @@ public:
         double duration;
 
         if (p_or_d[0] == 'P') {
-          if (step[1] == 'R') { // PRE
-            std::cin >> remote >> r_id >> duration;
-          } else if (step[1] == 'O') { // POST
+          if (step[1] == 'O') { // POST
             std::cin >> remote >> r_id >> duration;
             state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
             state.waiting_for_d_pre.push(r_id);
+          } else if (step[2] == 'E') { // PRE (step[2] distinguishes PRE from PROC)
+            std::cin >> remote >> r_id >> duration;
           } else { // PROC
             std::cin >> ls >> le >> remote >> r_id >> duration;
             state.all_request[r_id].layers_completed = le;
@@ -151,11 +151,7 @@ public:
             }
           }
         } else { // D
-          if (step[1] == 'R') { // PRE
-            std::cin >> minus_one >> m;
-            for(int j = 0; j < m; j++) { std::cin >> r_id; }
-            std::cin >> duration;
-          } else if (step[1] == 'O') { // POST
+          if (step[1] == 'O') { // POST
             std::cin >> minus_one >> m;
             for(int j = 0; j < m; j++) { 
               std::cin >> r_id;
@@ -163,6 +159,10 @@ public:
               state.waiting_for_d_pre.push(r_id);
               state.all_request[r_id].length_out++;
             }
+            std::cin >> duration;
+          } else if (step[2] == 'E') { // PRE
+            std::cin >> minus_one >> m;
+            for(int j = 0; j < m; j++) { std::cin >> r_id; }
             std::cin >> duration;
           } else { // PROC
             std::cin >> remote >> m;
