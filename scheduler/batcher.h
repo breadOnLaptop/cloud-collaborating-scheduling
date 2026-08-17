@@ -38,6 +38,10 @@ public:
             }
         }
         
+        if (optimal_max > 64) {
+            optimal_max = 64; 
+        }
+        
         std::vector<int> batch;
         while (!q.empty() && batch.size() < static_cast<size_t>(optimal_max)) {
             batch.push_back(q.front());

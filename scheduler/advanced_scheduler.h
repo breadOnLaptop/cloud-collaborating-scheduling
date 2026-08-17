@@ -59,7 +59,7 @@ private:
         > min_heap;
         
         for (int k = 0; k < params.K; ++k) {
-            size_t load = state.waiting_for_p_proc[k].size() + state.waiting_for_d_proc[k].size();
+            size_t load = state.waiting_for_p_proc[k].size() * 10 + state.waiting_for_d_proc[k].size();
             min_heap.push({load, k});
         }
         

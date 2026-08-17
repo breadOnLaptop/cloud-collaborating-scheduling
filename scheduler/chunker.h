@@ -26,12 +26,14 @@ public:
      * @return The calculated terminal layer index for the chunk.
      */
     static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size = 0) {
-        int chunk_size = 4;
+        int chunk_size = 8;
         
         if (decode_queue_size == 0) {
             chunk_size = 16;
-        } else if (decode_queue_size > 32) {
+        } else if (decode_queue_size > 16) {
             chunk_size = 2;
+        } else if (decode_queue_size > 4) {
+            chunk_size = 4;
         }
         
         int remaining = params.num_layers - ls;
