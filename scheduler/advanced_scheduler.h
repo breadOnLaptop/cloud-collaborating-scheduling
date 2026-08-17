@@ -1,7 +1,9 @@
 /**
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
- *        Includes Min-Heap usage for efficient queue state lookups. Refer to scheduler/baseline_scheduler.h for the update reference. 
+ *        Implements decode-first priority scheduling with O(log K) weighted
+ *        cloud load balancing and adaptive prefill chunking.
+ *        Refer to scheduler/baseline_scheduler.h for the baseline reference.
  *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
  * @author Authored by: opt1mal
  */
@@ -18,20 +20,39 @@
 #include "chunker.h"
 #include "batcher.h"
 
+/**
+ * @class AdvancedScheduler
+ * @brief Orchestrates task assignment across edge and cloud servers.
+ *
+ * Scheduling policy:
+ *   Edge server priority: D_POST > D_PRE > P_POST > P_PRE
+ *   Cloud server priority: D_PROC > P_PROC (decode-first to minimize token latency)
+ *
+ * Cloud load balancing uses a sorted set of (work, id) pairs for O(log K)
+ * minimum selection. Batch sizes are bounded by SLO2 constraints. All output
+ * is written directly into a caller-provided string buffer to avoid per-frame
+ * heap allocations.
+ */
 class AdvancedScheduler {
 private:
-    std::vector<double> total_assigned_work;
-    std::set<std::pair<double, int>> cloud_load;
-    int cached_optimal_max = -1; // Computed once, reused forever
-    std::vector<int> batch_buf;  // Reusable scratch buffer for batch pulls
+    std::vector<double> total_assigned_work;       // Cumulative work assigned per cloud node.
+    std::set<std::pair<double, int>> cloud_load;   // Sorted (work, cloud_id) for O(log K) min-pick.
+    int cached_optimal_max = -1;                   // SLO2-bounded batch limit, computed once at startup.
+    std::vector<int> batch_buf;                    // Reusable scratch buffer for batch extraction.
 
-    // Amortized O(1) queue cleaning to strictly avoid sorting overhead
+    /**
+     * @brief Pops finished requests from the front of a queue.
+     *        Amortized O(1) per call — only pops consecutive finished entries.
+     */
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
         while (!q.empty() && state.all_request[q.front()].state == RequestState::FINISHED) {
             q.pop();
         }
     }
 
+    /**
+     * @brief Lazily initializes cloud load tracking structures on first use.
+     */
     void ensureCloudInit(const SystemParams& params) {
         if (total_assigned_work.empty()) {
             total_assigned_work.assign(params.K, 0.0);
@@ -42,7 +63,11 @@ private:
         }
     }
 
-    // Weighted load tracking using O(log K) set
+    /**
+     * @brief Selects the least-loaded cloud server and assigns work to it.
+     *        O(log K) via sorted set extraction and reinsertion.
+     * @return The index of the optimal cloud server.
+     */
     int getOptimalCloudNode(const SystemState& state, const SystemParams& params, int r_id) {
         ensureCloudInit(params);
         
@@ -58,17 +83,23 @@ private:
     }
 
 public:
-    // Writes all assignments directly into a single output buffer — zero vector/string allocations
+    /**
+     * @brief Evaluates all queues and emits assignment directives into an output buffer.
+     * @param state Mutable system state containing server and queue status.
+     * @param parser Provides task timing data and system parameters.
+     * @param out Output buffer for formatted assignment strings.
+     * @param count Output counter for the number of assignments produced.
+     */
     void scheduleTasks(SystemState& state, const EventParser& parser, std::string& out, int& count) {
         count = 0;
         const SystemParams& params = parser.params;
 
-        // Cache optimal_max once globally — task_time_table never changes after startup
+        // Compute SLO2-bounded batch limit once; task_time_table is immutable after startup
         if (cached_optimal_max < 0) {
             cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
         }
 
-        // O(1) Amortized cleanup phase
+        // Amortized O(1) cleanup: pop finished requests from queue heads
         cleanQueue(state.waiting_for_p_pre, state);
         cleanQueue(state.waiting_for_p_post, state);
         cleanQueue(state.waiting_for_d_pre, state);
@@ -78,8 +109,8 @@ public:
             cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
+        // --- Edge server scheduling (single server, decode-first priority) ---
         if (state.edge_server.state == ServerState::FREE) {
-            // Priority 1: D POST (Finish token quickly for SLO2)
             if (!state.waiting_for_d_post.empty()) {
                 Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
                 out.append("E D POST -1 ");
@@ -88,7 +119,6 @@ public:
                 count++;
                 state.edge_server.setBusy();
                 
-            // Priority 2: D PRE (Start token quickly for SLO2)
             } else if (!state.waiting_for_d_pre.empty()) {
                 Batcher::pullBatch(state.waiting_for_d_pre, cached_optimal_max, state, batch_buf);
                 out.append("E D PRE -1 ");
@@ -97,7 +127,6 @@ public:
                 count++;
                 state.edge_server.setBusy();
                 
-            // Priority 3: P POST (Data returning from Cloud)
             } else if (!state.waiting_for_p_post.empty()) {
                 int r_id = state.waiting_for_p_post.front(); 
                 state.waiting_for_p_post.pop();
@@ -111,12 +140,10 @@ public:
                 count++;
                 state.edge_server.setBusy();
                 
-            // Priority 4: P PRE (New data arriving at Cloud)
             } else if (!state.waiting_for_p_pre.empty()) {
                 int r_id = state.waiting_for_p_pre.front(); 
                 state.waiting_for_p_pre.pop();
                 
-                // O(log K) weighted assignment
                 int cloud = getOptimalCloudNode(state, params, r_id);
                 state.all_request[r_id].assigned_cloud = cloud;
                 
@@ -130,9 +157,9 @@ public:
             }
         }
 
+        // --- Cloud server scheduling (per-server, decode-first priority) ---
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
-                // Yield to D_PROC decodes natively for token generation SLO
                 if (!state.waiting_for_d_proc[k].empty()) {
                     Batcher::pullBatch(state.waiting_for_d_proc[k], cached_optimal_max, state, batch_buf);
                     out.push_back('C');

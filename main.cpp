@@ -26,12 +26,11 @@ int main() {
     parser.readTaskTimeTable();
 
     SystemState state(parser.params.K);
-    // Fix 6: Pre-reserve request storage to prevent repeated resize reallocs
     state.all_request.reserve(100000);
 
     AdvancedScheduler scheduler;
 
-    // Fix 4: Single reusable output buffer — zero allocations in the hot loop
+    // Single reusable output buffer to avoid per-frame heap allocations
     std::string out_buf;
     out_buf.reserve(4096);
 
@@ -46,7 +45,7 @@ int main() {
         int assignment_count = 0;
         scheduler.scheduleTasks(state, parser, out_buf, assignment_count);
 
-        // Single write: count line + all assignment lines already in out_buf
+        // Emit frame response: assignment count followed by assignment directives
         char count_buf[16];
         auto r = std::to_chars(count_buf, count_buf + sizeof(count_buf), assignment_count);
         std::cout.write(count_buf, r.ptr - count_buf);

@@ -1,6 +1,8 @@
 /**
  * @file event_parser.h
  * @brief Handles data ingestion and event parsing for the scheduling system.
+ *        Uses stack-allocated char buffers for all token reads to eliminate
+ *        heap allocations in the hot parsing loop.
  * @author Authored by: opt1mal
  */
 
@@ -48,11 +50,19 @@ struct TaskDurations {
   double d_post;  // Decode post-processing duration.
 };
 
+/**
+ * @class EventParser
+ * @brief Parses interactive I/O streams to mutate system state.
+ *
+ * Processes initial configuration data and ingests real-time simulation events
+ * (ARR, TDN, XDN, FIN) to keep the global memory synchronized.
+ * All token reads use stack-allocated char buffers to avoid heap churn.
+ */
 class EventParser {
 public:
   double current_time;                            // Current simulation timestamp.
   SystemParams params;                            // Global system parameters.
-  std::unordered_map<int, TaskDurations> task_time_table;   // Table of execution times grouped by batch size.
+  std::unordered_map<int, TaskDurations> task_time_table;   // O(1) execution time lookup by batch size.
 
   /**
    * @brief Reads the initial startup configuration parameters.
@@ -86,17 +96,15 @@ public:
    * @return true if the simulation is ongoing, false if the END signal is received.
    */
   bool readNextFrame(SystemState& state) {
-    // Read first token as char[] to handle both END sentinel and timestamp without heap alloc
     char ts_buf[32];
     if (!(std::cin >> ts_buf)) return false;
-    if (ts_buf[0] == 'E') return false; // END signal
+    if (ts_buf[0] == 'E') return false;
 
     current_time = std::strtod(ts_buf, nullptr);
 
     int event_count;
     std::cin >> event_count;
 
-    // Fix 4: Stack-allocated char buffers for all short tokens — zero heap allocations
     char event_type[8];
     char server_name[16];
     char p_or_d[4];
@@ -105,7 +113,7 @@ public:
     for(int i = 0; i < event_count; i++) {
       std::cin >> event_type;
 
-      if(event_type[0] == 'A') { // ARR
+      if(event_type[0] == 'A') {
         int r_id, length_in;
         std::cin >> r_id >> length_in;
 
@@ -116,13 +124,13 @@ public:
         state.all_request[r_id] = std::move(new_req);
         state.waiting_for_p_pre.push(r_id);
 
-      } else if(event_type[0] == 'T') { // TDN
+      } else if(event_type[0] == 'T') {
         std::cin >> server_name;
 
         if (server_name[0] == 'E') {
           state.edge_server.setFree();
         } else {
-          // Fix 5: Parse cloud ID from char[] without substr or stoi
+          // Parse cloud ID directly from char buffer without heap allocation
           int cid = 0;
           for (int j = 1; server_name[j]; j++) {
             cid = cid * 10 + (server_name[j] - '0');
@@ -135,14 +143,15 @@ public:
         int remote, ls, le, m, r_id, minus_one;
         double duration;
 
+        // Disambiguation: step[1]=='O' → POST, step[2]=='E' → PRE, else → PROC
         if (p_or_d[0] == 'P') {
-          if (step[1] == 'O') { // POST
+          if (step[1] == 'O') {
             std::cin >> remote >> r_id >> duration;
             state.all_request[r_id].state = RequestState::READY_FOR_DECODE;
             state.waiting_for_d_pre.push(r_id);
-          } else if (step[2] == 'E') { // PRE (step[2] distinguishes PRE from PROC)
+          } else if (step[2] == 'E') {
             std::cin >> remote >> r_id >> duration;
-          } else { // PROC
+          } else {
             std::cin >> ls >> le >> remote >> r_id >> duration;
             state.all_request[r_id].layers_completed = le;
             if (le < params.num_layers) {
@@ -150,8 +159,8 @@ public:
               state.waiting_for_p_proc[remote].push(r_id);
             }
           }
-        } else { // D
-          if (step[1] == 'O') { // POST
+        } else {
+          if (step[1] == 'O') {
             std::cin >> minus_one >> m;
             for(int j = 0; j < m; j++) { 
               std::cin >> r_id;
@@ -160,18 +169,18 @@ public:
               state.all_request[r_id].length_out++;
             }
             std::cin >> duration;
-          } else if (step[2] == 'E') { // PRE
+          } else if (step[2] == 'E') {
             std::cin >> minus_one >> m;
             for(int j = 0; j < m; j++) { std::cin >> r_id; }
             std::cin >> duration;
-          } else { // PROC
+          } else {
             std::cin >> remote >> m;
             for(int j = 0; j < m; j++) { std::cin >> r_id; }
             std::cin >> duration;
           }
         }
 
-      } else if(event_type[0] == 'X') { // XDN
+      } else if(event_type[0] == 'X') {
         char direction[8];
         char stage[8];
         std::cin >> direction;
@@ -185,25 +194,25 @@ public:
           int r_id;
           std::cin >> r_id;
 
-          if (direction[0] == 'U') { // UP
-            if (stage[0] == 'P') { // PRE
+          if (direction[0] == 'U') {
+            if (stage[0] == 'P') {
               state.all_request[r_id].state = RequestState::READY_FOR_PREFILL;
               state.waiting_for_p_proc[remote].push(r_id);
-            } else { // DEC
+            } else {
               state.all_request[r_id].state = RequestState::READY_FOR_D_PROC;
               state.waiting_for_d_proc[remote].push(r_id);
             }
-          } else { // DOWN
-            if (stage[0] == 'P') { // PRE
+          } else {
+            if (stage[0] == 'P') {
               state.all_request[r_id].state = RequestState::READY_FOR_P_POST;
               state.waiting_for_p_post.push(r_id);
-            } else { // DEC
+            } else {
               state.all_request[r_id].state = RequestState::READY_FOR_D_POST;
               state.waiting_for_d_post.push(r_id);
             }
           }
         }
-      } else if(event_type[0] == 'F') { // FIN
+      } else if(event_type[0] == 'F') {
         int r_id;
         std::cin >> r_id;
         state.all_request[r_id].state = RequestState::FINISHED;
