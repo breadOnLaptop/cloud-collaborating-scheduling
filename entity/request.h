@@ -42,6 +42,10 @@ struct Request {
   int layers_completed; // Number of neural network layers processed during prefill.
   RequestState state;   // Current phase in the request lifecycle.
 
+  Request() : id(-1), length_in(0), length_out(0),
+              assigned_cloud(-1), layers_completed(0),
+              state(RequestState::ARRIVED) {}
+
   /**
    * @brief Constructs a new Request instance.
    * @param r_id The unique identifier.

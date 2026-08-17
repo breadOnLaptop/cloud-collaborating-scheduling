@@ -128,7 +128,10 @@ public:
         std::cin >> r_id >> length_in;
 
         Request new_req(r_id, length_in);
-        state.all_request.push_back(new_req);
+        if (r_id >= static_cast<int>(state.all_request.size())) {
+          state.all_request.resize(r_id + 1);
+        }
+        state.all_request[r_id] = std::move(new_req);
         state.waiting_for_p_pre.push(r_id);
 
       } else if(event_type == "TDN") {
