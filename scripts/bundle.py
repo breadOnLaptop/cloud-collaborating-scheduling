@@ -39,8 +39,9 @@ for file_path in files_in_order:
 out_path = os.path.join(project_root, output_file)
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 with open(out_path, 'w') as out:
-    out.write("// Authored by: Peeyush Maurya\n")
-    out.write("// Full Implementation: https://github.com/breadOnLaptop/cloud-collaborating-scheduling\n\n")
+    out.write("// Authored by: opt1mal\n")
+    out.write("// Full Implementation: https://github.com/breadOnLaptop/cloud-collaborating-scheduling\n")
+    out.write("// NOTE: Refer to Link after contest ends\n\n")
     for inc in sorted(list(system_includes)):
         out.write(inc + "\n")
     out.write("\n")

@@ -1,7 +1,9 @@
 /**
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
- * @author Authored by: Peeyush Maurya
+ *        Includes Min-Heap usage for efficient queue state lookups. Refer to scheduler/baseline_scheduler.h for the update reference. 
+ *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
+ * @author Authored by: opt1mal
  */
 
 #pragma once
@@ -9,6 +11,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <queue>
 #include "../state/system_state.h"
 #include "../io/event_parser.h"
 #include "chunker.h"
@@ -41,23 +44,26 @@ private:
     }
 
     /**
-     * @brief Identifies the optimal cloud node based on current systemic load.
+     * @brief Identifies the optimal cloud node based on current systemic load using a Min-Heap.
      * @param state The global state object.
      * @param params System parameters defining topology constraints.
      * @return The identifier of the least saturated cloud server.
      */
     int getOptimalCloudNode(const SystemState& state, const SystemParams& params) {
-        int best_cloud = 0;
-        size_t min_load = static_cast<size_t>(-1);
+        // Min-Heap usage for efficient queue state lookups
+        // Pair structure: {load_score, cloud_id}
+        std::priority_queue<
+            std::pair<size_t, int>, 
+            std::vector<std::pair<size_t, int>>, 
+            std::greater<std::pair<size_t, int>>
+        > min_heap;
         
         for (int k = 0; k < params.K; ++k) {
             size_t load = state.waiting_for_p_proc[k].size() + state.waiting_for_d_proc[k].size();
-            if (load < min_load) {
-                min_load = load;
-                best_cloud = k;
-            }
+            min_heap.push({load, k});
         }
-        return best_cloud;
+        
+        return min_heap.top().second;
     }
 
 public:

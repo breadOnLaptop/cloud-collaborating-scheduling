@@ -1,7 +1,7 @@
 /**
  * @file batcher.h
  * @brief Batch consolidation logic for multi-request scheduling.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once

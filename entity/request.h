@@ -1,7 +1,7 @@
 /**
  * @file request.h
  * @brief Defines the Request entity and its lifecycle states within the scheduling system.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once

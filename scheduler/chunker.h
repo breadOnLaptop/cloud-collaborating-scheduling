@@ -1,7 +1,7 @@
 /**
  * @file chunker.h
  * @brief Adaptive segmentation logic for heavy computational tasks.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once

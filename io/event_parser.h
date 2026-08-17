@@ -1,7 +1,7 @@
 /**
  * @file event_parser.h
  * @brief Handles data ingestion and event parsing for the scheduling system.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once

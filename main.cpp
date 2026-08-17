@@ -1,7 +1,7 @@
 /**
  * @file main.cpp
  * @brief Primary entry point for the scheduling orchestration engine.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #include <iostream>

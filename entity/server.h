@@ -1,7 +1,7 @@
 /**
  * @file server.h
  * @brief Defines the Server entity, representing compute nodes in the network.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once

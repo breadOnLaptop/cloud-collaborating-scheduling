@@ -1,7 +1,7 @@
 /**
  * @file baseline_scheduler.h
  * @brief Baseline decision engine for task distribution.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once

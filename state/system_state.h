@@ -1,7 +1,7 @@
 /**
  * @file system_state.h
  * @brief Centralized state management for the entire scheduling system.
- * @author Authored by: Peeyush Maurya
+ * @author Authored by: opt1mal
  */
 
 #pragma once
