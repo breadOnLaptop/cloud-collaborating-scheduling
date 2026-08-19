@@ -2,7 +2,7 @@
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
  *        Implements weight-adaptive priority scheduling with O(log K) weighted
- *        cloud load balancing and adaptive prefill chunking.
+ *        cloud load balancing and mode-specific batch/chunk strategies.
  *        Refer to scheduler/baseline_scheduler.h for the baseline reference.
  *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
  * @author Authored by: opt1mal
@@ -24,16 +24,17 @@
  * @class AdvancedScheduler
  * @brief Orchestrates task assignment across edge and cloud servers.
  *
- * The edge scheduling priority adapts to the test's scoring weights (w_tp, w_c):
- *
- * Latency-focused (w_c >= w_tp):
- *   D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE
- *   Minimizes TDR by completing prefills promptly and feeding idle clouds.
+ * Two scheduling modes selected by comparing w_tp and w_c:
  *
  * Throughput-focused (w_tp > w_c):
- *   D_POST > P_PRE (cloud idle) > D_PRE > P_POST > P_PRE
- *   Maximizes token rate by keeping the decode pipeline flowing and
- *   preventing cloud starvation (idle cloud = wasted throughput).
+ *   Edge: D_POST > D_PRE > P_POST > P_PRE (pure decode-first)
+ *   Batch: max size from table (TPOT irrelevant, maximize tokens per edge op)
+ *   Chunks: all remaining layers at once (eliminate setup overhead)
+ *
+ * Latency-focused (w_c >= w_tp):
+ *   Edge: D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE
+ *   Batch: SLO2-bounded (protect TPOT)
+ *   Chunks: adaptive yielding to decode pressure
  *
  * Cloud priority is always: D_PROC > P_PROC (decode-first).
  */
@@ -41,22 +42,16 @@ class AdvancedScheduler {
 private:
     std::vector<double> total_assigned_work;       // Cumulative work assigned per cloud node.
     std::set<std::pair<double, int>> cloud_load;   // Sorted (work, cloud_id) for O(log K) min-pick.
-    int cached_optimal_max = -1;                   // SLO2-bounded batch limit, computed once at startup.
+    int cached_optimal_max = -1;                   // Batch limit, computed once at startup.
+    bool throughput_mode = false;                   // True when w_tp > w_c.
     std::vector<int> batch_buf;                    // Reusable scratch buffer for batch extraction.
 
-    /**
-     * @brief Pops finished requests from the front of a queue.
-     *        Amortized O(1) per call — only pops consecutive finished entries.
-     */
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
         while (!q.empty() && state.all_request[q.front()].state == RequestState::FINISHED) {
             q.pop();
         }
     }
 
-    /**
-     * @brief Lazily initializes cloud load tracking structures on first use.
-     */
     void ensureCloudInit(const SystemParams& params) {
         if (total_assigned_work.empty()) {
             total_assigned_work.assign(params.K, 0.0);
@@ -67,28 +62,17 @@ private:
         }
     }
 
-    /**
-     * @brief Selects the least-loaded cloud server and assigns work to it.
-     *        O(log K) via sorted set extraction and reinsertion.
-     */
     int getOptimalCloudNode(const SystemState& state, const SystemParams& params, int r_id) {
         ensureCloudInit(params);
-        
         auto it = cloud_load.begin();
         int best_cloud = it->second;
         double new_work = it->first + static_cast<double>(state.all_request[r_id].length_in);
-        
         cloud_load.erase(it);
         cloud_load.insert({new_work, best_cloud});
         total_assigned_work[best_cloud] = new_work;
-        
         return best_cloud;
     }
 
-    /**
-     * @brief Checks if any cloud server is idle with no queued work.
-     *        An idle cloud is wasted capacity — triggers P_PRE elevation.
-     */
     bool isAnyCloudStarving(const SystemState& state, const SystemParams& params) {
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE &&
@@ -100,7 +84,7 @@ private:
         return false;
     }
 
-    // --- Helper methods to emit assignment directives ---
+    // --- Edge assignment emitters ---
 
     void emitDPost(SystemState& state, std::string& out, int& count) {
         Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
@@ -148,19 +132,23 @@ private:
     }
 
 public:
-    /**
-     * @brief Evaluates all queues and emits assignment directives into an output buffer.
-     *        Edge priority adapts based on scoring weights w_tp and w_c.
-     */
     void scheduleTasks(SystemState& state, const EventParser& parser, std::string& out, int& count) {
         count = 0;
         const SystemParams& params = parser.params;
 
+        // One-time initialization: select mode and batch strategy
         if (cached_optimal_max < 0) {
-            cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
+            throughput_mode = (params.w_tp > params.w_c);
+            if (throughput_mode) {
+                // Uncapped batch: max amortization, TPOT irrelevant
+                cached_optimal_max = Batcher::computeMaxBatch(parser.task_time_table);
+            } else {
+                // SLO2-bounded batch: protect TPOT
+                cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
+            }
         }
 
-        // Amortized O(1) cleanup: pop finished requests from queue heads
+        // Amortized O(1) cleanup
         cleanQueue(state.waiting_for_p_pre, state);
         cleanQueue(state.waiting_for_p_post, state);
         cleanQueue(state.waiting_for_d_pre, state);
@@ -170,42 +158,38 @@ public:
             cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
-        // --- Edge server scheduling (weight-adaptive priority) ---
+        // --- Edge server scheduling ---
         if (state.edge_server.state == ServerState::FREE) {
-            // D POST always first — directly produces tokens
             if (!state.waiting_for_d_post.empty()) {
+                // D POST always first — produces tokens
                 emitDPost(state, out, count);
 
-            } else {
-                bool cloud_starving = isAnyCloudStarving(state, params);
+            } else if (throughput_mode) {
+                // Throughput: pure decode-first, no cloud starvation elevation
+                if (!state.waiting_for_d_pre.empty()) {
+                    emitDPre(state, out, count);
+                } else if (!state.waiting_for_p_post.empty()) {
+                    emitPPost(state, out, count);
+                } else if (!state.waiting_for_p_pre.empty()) {
+                    emitPPre(state, params, out, count);
+                }
 
-                if (params.w_c >= params.w_tp) {
-                    // Latency-focused: minimize TDR by completing prefills promptly
-                    if (!state.waiting_for_p_post.empty()) {
-                        emitPPost(state, out, count);
-                    } else if (cloud_starving && !state.waiting_for_p_pre.empty()) {
-                        emitPPre(state, params, out, count);
-                    } else if (!state.waiting_for_d_pre.empty()) {
-                        emitDPre(state, out, count);
-                    } else if (!state.waiting_for_p_pre.empty()) {
-                        emitPPre(state, params, out, count);
-                    }
-                } else {
-                    // Throughput-focused: keep decode pipeline flowing, prevent cloud idle
-                    if (cloud_starving && !state.waiting_for_p_pre.empty()) {
-                        emitPPre(state, params, out, count);
-                    } else if (!state.waiting_for_d_pre.empty()) {
-                        emitDPre(state, out, count);
-                    } else if (!state.waiting_for_p_post.empty()) {
-                        emitPPost(state, out, count);
-                    } else if (!state.waiting_for_p_pre.empty()) {
-                        emitPPre(state, params, out, count);
-                    }
+            } else {
+                // Latency: prefill-aware priority with cloud starvation feeding
+                bool cloud_starving = isAnyCloudStarving(state, params);
+                if (!state.waiting_for_p_post.empty()) {
+                    emitPPost(state, out, count);
+                } else if (cloud_starving && !state.waiting_for_p_pre.empty()) {
+                    emitPPre(state, params, out, count);
+                } else if (!state.waiting_for_d_pre.empty()) {
+                    emitDPre(state, out, count);
+                } else if (!state.waiting_for_p_pre.empty()) {
+                    emitPPre(state, params, out, count);
                 }
             }
         }
 
-        // --- Cloud server scheduling (per-server, decode-first) ---
+        // --- Cloud server scheduling (decode-first, mode-adaptive chunking) ---
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
                 if (!state.waiting_for_d_proc[k].empty()) {
@@ -225,7 +209,14 @@ public:
                     state.waiting_for_p_proc[k].pop();
                     
                     int ls = state.all_request[r_id].layers_completed;
-                    int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
+                    int le;
+                    if (throughput_mode) {
+                        // All remaining layers at once — zero extra setup penalties
+                        le = params.num_layers;
+                    } else {
+                        // Adaptive chunking — yield to decode pressure
+                        le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
+                    }
                     
                     out.push_back('C');
                     appendIntToString(out, k);
