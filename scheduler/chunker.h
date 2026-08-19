@@ -35,14 +35,15 @@ public:
      * @param pressure_chunk Chunk size to use when decode items are queued (2 or 8).
      * @return The ending layer index for this chunk.
      */
-    static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size, int pressure_chunk = 8) {
+    static int getNextChunkEnd(int ls, const SystemParams& params, size_t decode_queue_size, int pressure_chunk = 8, int no_pressure_cap = 0) {
         int chunk_size;
         
         if (decode_queue_size > 0) {
             chunk_size = std::min(params.num_layers, pressure_chunk);
         } else {
-            // No decode pressure: process all remaining layers in one burst
-            chunk_size = params.num_layers;
+            // no_pressure_cap > 0: re-check for decode work periodically (THROUGHPUT_EXTREME)
+            // no_pressure_cap == 0: process all remaining layers in one burst (default)
+            chunk_size = (no_pressure_cap > 0) ? std::min(params.num_layers, no_pressure_cap) : params.num_layers;
         }
         
         int remaining = params.num_layers - ls;
