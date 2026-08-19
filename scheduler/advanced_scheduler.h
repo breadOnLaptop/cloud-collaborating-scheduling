@@ -1,7 +1,7 @@
 /**
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
- *        Implements pipeline-aware priority scheduling with O(log K) weighted
+ *        Implements weight-adaptive priority scheduling with O(log K) weighted
  *        cloud load balancing and adaptive prefill chunking.
  *        Refer to scheduler/baseline_scheduler.h for the baseline reference.
  *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
@@ -24,18 +24,18 @@
  * @class AdvancedScheduler
  * @brief Orchestrates task assignment across edge and cloud servers.
  *
- * Edge priority (pipeline-aware):
- *   1. D_POST  — always first: completes a token (critical for TPOT)
- *   2. P_POST  — completes a prefill, reduces TDR, makes request decode-ready
- *   3. P_PRE   — only when a cloud server is idle: prevents pipeline starvation
- *   4. D_PRE   — batches decode requests for cloud processing
- *   5. P_PRE   — background prefill when no cloud is starving
+ * The edge scheduling priority adapts to the test's scoring weights (w_tp, w_c):
  *
- * Cloud priority: D_PROC > P_PROC (decode-first to minimize token latency)
+ * Latency-focused (w_c >= w_tp):
+ *   D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE
+ *   Minimizes TDR by completing prefills promptly and feeding idle clouds.
  *
- * This priority order prevents the edge from being monopolized by decode
- * operations, which would starve new requests and cause TDR to explode
- * on large inputs.
+ * Throughput-focused (w_tp > w_c):
+ *   D_POST > P_PRE (cloud idle) > D_PRE > P_POST > P_PRE
+ *   Maximizes token rate by keeping the decode pipeline flowing and
+ *   preventing cloud starvation (idle cloud = wasted throughput).
+ *
+ * Cloud priority is always: D_PROC > P_PROC (decode-first).
  */
 class AdvancedScheduler {
 private:
@@ -87,7 +87,7 @@ private:
 
     /**
      * @brief Checks if any cloud server is idle with no queued work.
-     *        Used to trigger P_PRE priority elevation to prevent pipeline starvation.
+     *        An idle cloud is wasted capacity — triggers P_PRE elevation.
      */
     bool isAnyCloudStarving(const SystemState& state, const SystemParams& params) {
         for (int k = 0; k < params.K; ++k) {
@@ -100,16 +100,64 @@ private:
         return false;
     }
 
+    // --- Helper methods to emit assignment directives ---
+
+    void emitDPost(SystemState& state, std::string& out, int& count) {
+        Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
+        out.append("E D POST -1 ");
+        Batcher::appendBatchStr(out, batch_buf);
+        out.push_back('\n');
+        count++;
+        state.edge_server.setBusy();
+    }
+
+    void emitDPre(SystemState& state, std::string& out, int& count) {
+        Batcher::pullBatch(state.waiting_for_d_pre, cached_optimal_max, state, batch_buf);
+        out.append("E D PRE -1 ");
+        Batcher::appendBatchStr(out, batch_buf);
+        out.push_back('\n');
+        count++;
+        state.edge_server.setBusy();
+    }
+
+    void emitPPost(SystemState& state, std::string& out, int& count) {
+        int r_id = state.waiting_for_p_post.front();
+        state.waiting_for_p_post.pop();
+        int cloud = state.all_request[r_id].assigned_cloud;
+        out.append("E P POST ");
+        appendIntToString(out, cloud);
+        out.push_back(' ');
+        appendIntToString(out, r_id);
+        out.push_back('\n');
+        count++;
+        state.edge_server.setBusy();
+    }
+
+    void emitPPre(SystemState& state, const SystemParams& params, std::string& out, int& count) {
+        int r_id = state.waiting_for_p_pre.front();
+        state.waiting_for_p_pre.pop();
+        int cloud = getOptimalCloudNode(state, params, r_id);
+        state.all_request[r_id].assigned_cloud = cloud;
+        out.append("E P PRE ");
+        appendIntToString(out, cloud);
+        out.push_back(' ');
+        appendIntToString(out, r_id);
+        out.push_back('\n');
+        count++;
+        state.edge_server.setBusy();
+    }
+
 public:
     /**
      * @brief Evaluates all queues and emits assignment directives into an output buffer.
+     *        Edge priority adapts based on scoring weights w_tp and w_c.
      */
     void scheduleTasks(SystemState& state, const EventParser& parser, std::string& out, int& count) {
         count = 0;
         const SystemParams& params = parser.params;
 
         if (cached_optimal_max < 0) {
-            cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
+            cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
         }
 
         // Amortized O(1) cleanup: pop finished requests from queue heads
@@ -122,71 +170,38 @@ public:
             cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
-        // --- Edge server scheduling (pipeline-aware priority) ---
+        // --- Edge server scheduling (weight-adaptive priority) ---
         if (state.edge_server.state == ServerState::FREE) {
-            // Priority 1: D POST — completes a token, critical for both tp and TPOT
+            // D POST always first — directly produces tokens
             if (!state.waiting_for_d_post.empty()) {
-                Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
-                out.append("E D POST -1 ");
-                Batcher::appendBatchStr(out, batch_buf);
-                out.push_back('\n');
-                count++;
-                state.edge_server.setBusy();
+                emitDPost(state, out, count);
 
-            // Priority 2: P POST — completes prefill, reduces TDR, makes request decode-ready
-            } else if (!state.waiting_for_p_post.empty()) {
-                int r_id = state.waiting_for_p_post.front();
-                state.waiting_for_p_post.pop();
+            } else {
+                bool cloud_starving = isAnyCloudStarving(state, params);
 
-                int cloud = state.all_request[r_id].assigned_cloud;
-                out.append("E P POST ");
-                appendIntToString(out, cloud);
-                out.push_back(' ');
-                appendIntToString(out, r_id);
-                out.push_back('\n');
-                count++;
-                state.edge_server.setBusy();
-
-            // Priority 3: P PRE when clouds are starving — prevents pipeline starvation
-            } else if (!state.waiting_for_p_pre.empty() && isAnyCloudStarving(state, params)) {
-                int r_id = state.waiting_for_p_pre.front();
-                state.waiting_for_p_pre.pop();
-
-                int cloud = getOptimalCloudNode(state, params, r_id);
-                state.all_request[r_id].assigned_cloud = cloud;
-
-                out.append("E P PRE ");
-                appendIntToString(out, cloud);
-                out.push_back(' ');
-                appendIntToString(out, r_id);
-                out.push_back('\n');
-                count++;
-                state.edge_server.setBusy();
-
-            // Priority 4: D PRE — starts a decode batch
-            } else if (!state.waiting_for_d_pre.empty()) {
-                Batcher::pullBatch(state.waiting_for_d_pre, cached_optimal_max, state, batch_buf);
-                out.append("E D PRE -1 ");
-                Batcher::appendBatchStr(out, batch_buf);
-                out.push_back('\n');
-                count++;
-                state.edge_server.setBusy();
-
-            // Priority 5: P PRE — background prefill when no cloud is starving
-            } else if (!state.waiting_for_p_pre.empty()) {
-                int r_id = state.waiting_for_p_pre.front();
-                state.waiting_for_p_pre.pop();
-
-                int cloud = getOptimalCloudNode(state, params, r_id);
-                state.all_request[r_id].assigned_cloud = cloud;
-
-                out.append("E P PRE ");
-                appendIntToString(out, cloud);
-                out.push_back(' ');
-                appendIntToString(out, r_id);
-                out.push_back('\n');
-                count++;
-                state.edge_server.setBusy();
+                if (params.w_c >= params.w_tp) {
+                    // Latency-focused: minimize TDR by completing prefills promptly
+                    if (!state.waiting_for_p_post.empty()) {
+                        emitPPost(state, out, count);
+                    } else if (cloud_starving && !state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    } else if (!state.waiting_for_d_pre.empty()) {
+                        emitDPre(state, out, count);
+                    } else if (!state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    }
+                } else {
+                    // Throughput-focused: keep decode pipeline flowing, prevent cloud idle
+                    if (cloud_starving && !state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    } else if (!state.waiting_for_d_pre.empty()) {
+                        emitDPre(state, out, count);
+                    } else if (!state.waiting_for_p_post.empty()) {
+                        emitPPost(state, out, count);
+                    } else if (!state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    }
+                }
             }
         }
 
