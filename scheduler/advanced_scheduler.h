@@ -153,7 +153,7 @@ public:
                 cached_optimal_max = Batcher::computeMaxBatch(parser.task_time_table);
             } else {
                 current_strategy = StrategyMode::LATENCY_STRICT;
-                cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
+                cached_optimal_max = Batcher::computeStrictMax(parser.task_time_table, params.SLO2, params);
             }
         }
 
