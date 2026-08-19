@@ -1,8 +1,9 @@
 /**
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
- *        Implements weight-adaptive priority scheduling with O(log K) weighted
- *        cloud load balancing and mode-specific batch/chunk strategies.
+ *        Uses w_c threshold to select between two proven configurations:
+ *        - Latency mode (default): P_POST priority, chunk=8, SLO2-bounded batch
+ *        - Throughput mode (w_c ≈ 0): decode-first priority, chunk=2, max batch
  *        Refer to scheduler/baseline_scheduler.h for the baseline reference.
  *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
  * @author Authored by: opt1mal
@@ -24,26 +25,28 @@
  * @class AdvancedScheduler
  * @brief Orchestrates task assignment across edge and cloud servers.
  *
- * Two scheduling modes selected by comparing w_tp and w_c:
+ * Configuration is selected once at startup based on w_c:
  *
- * Throughput-focused (w_tp > w_c):
- *   Edge: D_POST > D_PRE > P_POST > P_PRE (pure decode-first)
- *   Batch: max size from table (TPOT irrelevant, maximize tokens per edge op)
- *   Chunks: all remaining layers at once (eliminate setup overhead)
+ * Latency mode (w_c >= 0.01, the default for nearly all tests):
+ *   Edge:   D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE
+ *   Batch:  SLO2-bounded (3S + d_pre + d_proc + d_post <= SLO2)
+ *   Chunks: 8 layers under decode pressure, all layers with no pressure
+ *   Rationale: Faster prefill completion feeds larger natural decode batches,
+ *              which amortizes setup cost — improving BOTH latency AND throughput.
  *
- * Latency-focused (w_c >= w_tp):
- *   Edge: D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE
- *   Batch: SLO2-bounded (protect TPOT)
- *   Chunks: adaptive yielding to decode pressure
- *
- * Cloud priority is always: D_PROC > P_PROC (decode-first).
+ * Throughput mode (w_c < 0.01, i.e. only pure-throughput tests):
+ *   Edge:   D_POST > D_PRE > P_POST > P_PRE
+ *   Batch:  Max from table (TPOT is irrelevant when w_c = 0)
+ *   Chunks: 2 layers under decode pressure, 16 with no pressure
+ *   Rationale: Maximizes decode responsiveness on saturated systems where
+ *              the edge is the bottleneck.
  */
 class AdvancedScheduler {
 private:
     std::vector<double> total_assigned_work;       // Cumulative work assigned per cloud node.
     std::set<std::pair<double, int>> cloud_load;   // Sorted (work, cloud_id) for O(log K) min-pick.
     int cached_optimal_max = -1;                   // Batch limit, computed once at startup.
-    bool throughput_mode = false;                   // True when w_tp > w_c.
+    bool latency_mode = true;                      // Default: latency mode for most tests.
     std::vector<int> batch_buf;                    // Reusable scratch buffer for batch extraction.
 
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
@@ -136,10 +139,14 @@ public:
         count = 0;
         const SystemParams& params = parser.params;
 
-        // One-time initialization: select mode and batch strategy
+        // One-time initialization: select mode based on w_c threshold
         if (cached_optimal_max < 0) {
-            throughput_mode = (params.w_tp > params.w_c);
-            cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
+            latency_mode = (params.w_c >= 0.01);
+            if (latency_mode) {
+                cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
+            } else {
+                cached_optimal_max = Batcher::computeMaxBatch(parser.task_time_table);
+            }
         }
 
         // Amortized O(1) cleanup
@@ -155,21 +162,10 @@ public:
         // --- Edge server scheduling ---
         if (state.edge_server.state == ServerState::FREE) {
             if (!state.waiting_for_d_post.empty()) {
-                // D POST always first — produces tokens
                 emitDPost(state, out, count);
 
-            } else if (throughput_mode) {
-                // Throughput: pure decode-first, no cloud starvation elevation
-                if (!state.waiting_for_d_pre.empty()) {
-                    emitDPre(state, out, count);
-                } else if (!state.waiting_for_p_post.empty()) {
-                    emitPPost(state, out, count);
-                } else if (!state.waiting_for_p_pre.empty()) {
-                    emitPPre(state, params, out, count);
-                }
-
-            } else {
-                // Latency: prefill-aware priority with cloud starvation feeding
+            } else if (latency_mode) {
+                // Latency: P POST > P PRE (cloud starving) > D PRE > P PRE
                 bool cloud_starving = isAnyCloudStarving(state, params);
                 if (!state.waiting_for_p_post.empty()) {
                     emitPPost(state, out, count);
@@ -177,6 +173,16 @@ public:
                     emitPPre(state, params, out, count);
                 } else if (!state.waiting_for_d_pre.empty()) {
                     emitDPre(state, out, count);
+                } else if (!state.waiting_for_p_pre.empty()) {
+                    emitPPre(state, params, out, count);
+                }
+
+            } else {
+                // Throughput (w_c ≈ 0): pure decode-first
+                if (!state.waiting_for_d_pre.empty()) {
+                    emitDPre(state, out, count);
+                } else if (!state.waiting_for_p_post.empty()) {
+                    emitPPost(state, out, count);
                 } else if (!state.waiting_for_p_pre.empty()) {
                     emitPPre(state, params, out, count);
                 }
@@ -203,7 +209,7 @@ public:
                     state.waiting_for_p_proc[k].pop();
                     
                     int ls = state.all_request[r_id].layers_completed;
-                    int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
+                    int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size(), latency_mode);
                     
                     out.push_back('C');
                     appendIntToString(out, k);
