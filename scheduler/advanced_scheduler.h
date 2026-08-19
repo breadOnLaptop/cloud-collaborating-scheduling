@@ -178,13 +178,16 @@ public:
                 }
 
             } else {
-                // Throughput (w_c ≈ 0): pure decode-first
-                if (!state.waiting_for_d_pre.empty()) {
-                    emitDPre(state, out, count);
-                } else if (!state.waiting_for_p_post.empty()) {
+                // Throughput (w_c ≈ 0): prefill-first to accumulate large decode batches.
+                // P PRE above D PRE means all pending prefills complete before decode starts,
+                // building d_pre queues of 100+ requests → each D PRE batches them all → 50-100x
+                // fewer edge operations → massive throughput gain on saturated systems.
+                if (!state.waiting_for_p_post.empty()) {
                     emitPPost(state, out, count);
                 } else if (!state.waiting_for_p_pre.empty()) {
                     emitPPre(state, params, out, count);
+                } else if (!state.waiting_for_d_pre.empty()) {
+                    emitDPre(state, out, count);
                 }
             }
         }
