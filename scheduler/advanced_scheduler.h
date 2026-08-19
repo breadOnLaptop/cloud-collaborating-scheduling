@@ -139,13 +139,7 @@ public:
         // One-time initialization: select mode and batch strategy
         if (cached_optimal_max < 0) {
             throughput_mode = (params.w_tp > params.w_c);
-            if (throughput_mode) {
-                // Uncapped batch: max amortization, TPOT irrelevant
-                cached_optimal_max = Batcher::computeMaxBatch(parser.task_time_table);
-            } else {
-                // SLO2-bounded batch: protect TPOT
-                cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
-            }
+            cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
         }
 
         // Amortized O(1) cleanup
@@ -209,14 +203,7 @@ public:
                     state.waiting_for_p_proc[k].pop();
                     
                     int ls = state.all_request[r_id].layers_completed;
-                    int le;
-                    if (throughput_mode) {
-                        // All remaining layers at once — zero extra setup penalties
-                        le = params.num_layers;
-                    } else {
-                        // Adaptive chunking — yield to decode pressure
-                        le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
-                    }
+                    int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
                     
                     out.push_back('C');
                     appendIntToString(out, k);

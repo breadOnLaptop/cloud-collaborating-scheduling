@@ -1,8 +1,10 @@
 /**
  * @file chunker.h
  * @brief Adaptive segmentation logic for prefill layer processing.
- *        Dynamically adjusts chunk sizes based on decode queue pressure
- *        to balance throughput against token latency constraints.
+ *        Small chunks under decode pressure enable the cloud to interleave
+ *        P_PROC with D_PROC, keeping the decode pipeline responsive.
+ *        Each chunk pays a fixed setup penalty S, so chunk size balances
+ *        responsiveness (small) against setup overhead (large).
  * @author Authored by: opt1mal
  */
 
@@ -15,11 +17,11 @@
  * @class Chunker
  * @brief Determines how many neural network layers to process in a single P_PROC call.
  *
- * Each P_PROC chunk pays a fixed setup penalty S. Fewer chunks = less overhead
- * but longer blocking of the cloud server. The chunk size adapts to decode
- * queue pressure on the specific cloud server:
- *   - No decodes waiting: process all remaining layers (zero extra S overhead)
- *   - Decodes waiting: chunk to 8 layers (balances throughput vs decode latency)
+ * Chunk=2 under decode pressure ensures the cloud re-checks for D_PROC work
+ * every 2 layers. This keeps the decode pipeline flowing — critical for both
+ * throughput (more decode cycles per second) and latency (lower TPOT).
+ * Without this, a full-model P_PROC blocks the cloud for the entire prefill
+ * duration, causing decode starvation.
  */
 class Chunker {
 public:
@@ -34,11 +36,11 @@ public:
         int chunk_size;
         
         if (decode_queue_size > 0) {
-            // Yield to pending decodes with moderate chunks to balance S overhead vs latency
-            chunk_size = std::min(params.num_layers, 8);
+            // Yield aggressively: re-check for decode work every 2 layers
+            chunk_size = 2;
         } else {
-            // No decode pressure: process all remaining layers to eliminate setup penalties
-            chunk_size = params.num_layers;
+            // No decode pressure: burst up to 16 layers to reduce setup overhead
+            chunk_size = std::min(params.num_layers, 16);
         }
         
         int remaining = params.num_layers - ls;
