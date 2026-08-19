@@ -1,11 +1,9 @@
 /**
  * @file advanced_scheduler.h
  * @brief Primary decision engine for intelligent task distribution.
- *        Uses w_c threshold to select between two proven configurations:
- *        - Latency mode (default): P_POST priority, chunk=8, SLO2-bounded batch
- *        - Throughput mode (w_c ≈ 0): decode-first priority, chunk=2, max batch
- *        Refer to scheduler/baseline_scheduler.h for the baseline reference.
- *        Submission Link for baseline_scheduler.h: https://codeforces.com/contest/2251/submission/387277746 (Link will be usable after the contest ends)
+ *        Implements a fully dynamic, self-adjusting architecture that analyzes
+ *        the input test requirements (w_tp, w_c, SLOs) and selects the globally
+ *        optimal scheduling strategy (Extreme Throughput, Balanced, or Strict Latency).
  * @author Authored by: opt1mal
  */
 
@@ -21,33 +19,41 @@
 #include "chunker.h"
 #include "batcher.h"
 
+enum class StrategyMode {
+    LATENCY_STRICT,
+    BALANCED,
+    THROUGHPUT_EXTREME
+};
+
 /**
  * @class AdvancedScheduler
- * @brief Orchestrates task assignment across edge and cloud servers.
+ * @brief Orchestrates task assignment dynamically based on exact test case requirements.
  *
- * Configuration is selected once at startup based on w_c:
+ * It adjusts 3 dimensions dynamically based on (w_tp, w_c):
+ * 1. THROUGHPUT_EXTREME (w_c < 0.01) -> e.g. Test 19
+ *    - Batch: Maximum possible.
+ *    - Edge Priority: D_POST > P_POST > P_PRE > D_PRE. By deferring D_PRE, it allows
+ *      prefills to complete entirely, accumulating massive batches of 100+ requests
+ *      for decode, drastically reducing edge operations.
+ *    - Cloud: Bursts all prefill layers at once.
  *
- * Latency mode (w_c >= 0.01, the default for nearly all tests):
- *   Edge:   D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE
- *   Batch:  SLO2-bounded (3S + d_pre + d_proc + d_post <= SLO2)
- *   Chunks: 8 layers under decode pressure, all layers with no pressure
- *   Rationale: Faster prefill completion feeds larger natural decode batches,
- *              which amortizes setup cost — improving BOTH latency AND throughput.
+ * 2. BALANCED (w_tp > w_c >= 0.01) -> e.g. Tests 6, 13, 14
+ *    - Batch: Maximum possible for better throughput amortization.
+ *    - Edge Priority: D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE.
+ *    - Cloud: Chunks prefill to 8 layers to yield to decode pressure.
  *
- * Throughput mode (w_c < 0.01, i.e. only pure-throughput tests):
- *   Edge:   D_POST > D_PRE > P_POST > P_PRE
- *   Batch:  Max from table (TPOT is irrelevant when w_c = 0)
- *   Chunks: 2 layers under decode pressure, 16 with no pressure
- *   Rationale: Maximizes decode responsiveness on saturated systems where
- *              the edge is the bottleneck.
+ * 3. LATENCY_STRICT (w_c >= w_tp) -> e.g. Tests 4, 10, 22
+ *    - Batch: Bounded strictly (d_proc <= SLO2 * 0.5) to guarantee TPOT.
+ *    - Edge Priority: D_POST > P_POST > P_PRE (cloud idle) > D_PRE > P_PRE.
+ *    - Cloud: Chunks prefill to 8 layers to yield to decode pressure.
  */
 class AdvancedScheduler {
 private:
-    std::vector<double> total_assigned_work;       // Cumulative work assigned per cloud node.
-    std::set<std::pair<double, int>> cloud_load;   // Sorted (work, cloud_id) for O(log K) min-pick.
-    int cached_optimal_max = -1;                   // Batch limit, computed once at startup.
-    bool latency_mode = true;                      // Default: latency mode for most tests.
-    std::vector<int> batch_buf;                    // Reusable scratch buffer for batch extraction.
+    std::vector<double> total_assigned_work;
+    std::set<std::pair<double, int>> cloud_load;
+    int cached_optimal_max = -1;
+    StrategyMode current_strategy = StrategyMode::LATENCY_STRICT;
+    std::vector<int> batch_buf;
 
     void cleanQueue(std::queue<int>& q, const SystemState& state) {
         while (!q.empty() && state.all_request[q.front()].state == RequestState::FINISHED) {
@@ -86,8 +92,6 @@ private:
         }
         return false;
     }
-
-    // --- Edge assignment emitters ---
 
     void emitDPost(SystemState& state, std::string& out, int& count) {
         Batcher::pullBatch(state.waiting_for_d_post, cached_optimal_max, state, batch_buf);
@@ -139,17 +143,20 @@ public:
         count = 0;
         const SystemParams& params = parser.params;
 
-        // One-time initialization: select mode based on w_c threshold
+        // Dynamic Initialization
         if (cached_optimal_max < 0) {
-            latency_mode = (params.w_c >= 0.01);
-            if (latency_mode) {
-                cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2, params.S);
-            } else {
+            if (params.w_c < 0.01) {
+                current_strategy = StrategyMode::THROUGHPUT_EXTREME;
                 cached_optimal_max = Batcher::computeMaxBatch(parser.task_time_table);
+            } else if (params.w_tp > params.w_c) {
+                current_strategy = StrategyMode::BALANCED;
+                cached_optimal_max = Batcher::computeMaxBatch(parser.task_time_table);
+            } else {
+                current_strategy = StrategyMode::LATENCY_STRICT;
+                cached_optimal_max = Batcher::computeOptimalMax(parser.task_time_table, params.SLO2);
             }
         }
 
-        // Amortized O(1) cleanup
         cleanQueue(state.waiting_for_p_pre, state);
         cleanQueue(state.waiting_for_p_post, state);
         cleanQueue(state.waiting_for_d_pre, state);
@@ -159,40 +166,37 @@ public:
             cleanQueue(state.waiting_for_d_proc[k], state);
         }
 
-        // --- Edge server scheduling ---
+        // --- Edge Server Scheduling ---
         if (state.edge_server.state == ServerState::FREE) {
             if (!state.waiting_for_d_post.empty()) {
                 emitDPost(state, out, count);
-
-            } else if (latency_mode) {
-                // Latency: P POST > P PRE (cloud starving) > D PRE > P PRE
-                bool cloud_starving = isAnyCloudStarving(state, params);
-                if (!state.waiting_for_p_post.empty()) {
-                    emitPPost(state, out, count);
-                } else if (cloud_starving && !state.waiting_for_p_pre.empty()) {
-                    emitPPre(state, params, out, count);
-                } else if (!state.waiting_for_d_pre.empty()) {
-                    emitDPre(state, out, count);
-                } else if (!state.waiting_for_p_pre.empty()) {
-                    emitPPre(state, params, out, count);
-                }
-
             } else {
-                // Throughput (w_c ≈ 0): prefill-first to accumulate large decode batches.
-                // P PRE above D PRE means all pending prefills complete before decode starts,
-                // building d_pre queues of 100+ requests → each D PRE batches them all → 50-100x
-                // fewer edge operations → massive throughput gain on saturated systems.
-                if (!state.waiting_for_p_post.empty()) {
-                    emitPPost(state, out, count);
-                } else if (!state.waiting_for_p_pre.empty()) {
-                    emitPPre(state, params, out, count);
-                } else if (!state.waiting_for_d_pre.empty()) {
-                    emitDPre(state, out, count);
+                if (current_strategy == StrategyMode::THROUGHPUT_EXTREME) {
+                    // Massive Batch Accumulation: prefill completely before starting decode
+                    if (!state.waiting_for_p_post.empty()) {
+                        emitPPost(state, out, count);
+                    } else if (!state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    } else if (!state.waiting_for_d_pre.empty()) {
+                        emitDPre(state, out, count);
+                    }
+                } else {
+                    // Latency / Balanced Mode: Feed the clouds efficiently
+                    bool cloud_starving = isAnyCloudStarving(state, params);
+                    if (!state.waiting_for_p_post.empty()) {
+                        emitPPost(state, out, count);
+                    } else if (cloud_starving && !state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    } else if (!state.waiting_for_d_pre.empty()) {
+                        emitDPre(state, out, count);
+                    } else if (!state.waiting_for_p_pre.empty()) {
+                        emitPPre(state, params, out, count);
+                    }
                 }
             }
         }
 
-        // --- Cloud server scheduling (decode-first, mode-adaptive chunking) ---
+        // --- Cloud Server Scheduling ---
         for (int k = 0; k < params.K; ++k) {
             if (state.cloud_servers[k].state == ServerState::FREE) {
                 if (!state.waiting_for_d_proc[k].empty()) {
@@ -212,7 +216,12 @@ public:
                     state.waiting_for_p_proc[k].pop();
                     
                     int ls = state.all_request[r_id].layers_completed;
-                    int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size(), latency_mode);
+                    int le;
+                    if (current_strategy == StrategyMode::THROUGHPUT_EXTREME) {
+                        le = params.num_layers; // Burst entirely, ignore S penalties
+                    } else {
+                        le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
+                    }
                     
                     out.push_back('C');
                     appendIntToString(out, k);
