@@ -216,12 +216,10 @@ public:
                     state.waiting_for_p_proc[k].pop();
                     
                     int ls = state.all_request[r_id].layers_completed;
-                    int le;
-                    if (current_strategy == StrategyMode::THROUGHPUT_EXTREME) {
-                        le = params.num_layers; // Burst entirely, ignore S penalties
-                    } else {
-                        le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size());
-                    }
+                    // Strategy-aware chunking: small chunks for decode-heavy tests,
+                    // moderate chunks for balanced/latency tests
+                    int pressure_chunk = (current_strategy == StrategyMode::THROUGHPUT_EXTREME) ? 2 : 8;
+                    int le = Chunker::getNextChunkEnd(ls, params, state.waiting_for_d_proc[k].size(), pressure_chunk);
                     
                     out.push_back('C');
                     appendIntToString(out, k);
